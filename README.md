@@ -66,6 +66,16 @@ Each index can use standalone local storage, a cloud source, or a hybrid mode. T
 
 Set `BACKUP_ENABLED=true`, `BACKUP_INTERVAL_HOURS`, `BACKUP_RETENTION_COUNT`, and optionally `BACKUP_STORAGE_HOST_PATH` to enable scheduled snapshots, or use the Admin interface to run a backup. Snapshots can contain documents and credentials. Store them somewhere private and test restores independently; a backup on the same disk does not protect against disk loss.
 
+## Safe development with local customization
+
+Install the publication guards in each development checkout:
+
+```sh
+python3 scripts/install_privacy_guards.py
+```
+
+Keep installation-specific changes in ignored environment/Compose overrides and private data directories. Commits check staged source and pushes check reachable history, including credentials and private paths. New source modules need explicit Docker input-list updates. The repository root is deliberately excluded as a Docker build context; use the existing Compose service contexts. See [private configuration and publication workflow](docs/privacy.md) for setup, feature development, local private-value checks, and publication review. Pushing source does not deploy or restart your installation.
+
 ## Development and tests
 
 The Flask backend is in `app/backend`, the static frontend in `app/frontend`, and email processing in `app/email_processor`. The services build from Dockerfiles with pinned runtime images and dependency lock files. `app/docker-compose.yml` is the shared service definition; root `compose.yaml` includes it. `compose.override.yaml`, `.env` files, and `app/data/` are local-only. Change application code in Git, and place machine-specific settings in those local files.

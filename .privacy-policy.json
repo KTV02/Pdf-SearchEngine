@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "allowed_roots": [
+    "cd23f427dac20b6a1f96b0a34d5751885309b2d1"
+  ],
+  "public_author_names": [
+    "KTV02",
+    "PDFSearch contributors"
+  ],
+  "public_paths": [
+    ".gitattributes",
+    ".gitignore",
+    ".dockerignore",
+    ".gitleaks.toml",
+    ".privacy-policy.json",
+    "LICENSE",
+    "README.md",
+    "compose.yaml",
+    "app/.dockerignore",
+    "app/.env.example",
+    "app/docker-compose.yml",
+    "app/pytest.ini",
+    "app/start_template.sh",
+    "app/backend/.dockerignore",
+    "app/backend/Dockerfile",
+    "app/backend/*.py",
+    "app/backend/requirements*.txt",
+    "app/backend/requirements*.lock",
+    "app/email_processor/.dockerignore",
+    "app/email_processor/Dockerfile",
+    "app/email_processor/*.py",
+    "app/email_processor/requirements*.txt",
+    "app/email_processor/requirements*.lock",
+    "app/frontend/*.js",
+    "app/frontend/*.css",
+    "app/frontend/*.html",
+    "app/frontend/*.sh",
+    "app/tests/*.py",
+    "app/tests/Dockerfile.test",
+    "app/tests/requirements*.txt",
+    "scripts/*.py",
+    ".githooks/pre-commit",
+    ".githooks/commit-msg",
+    ".githooks/pre-push",
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml",
+    "docs/**/*.md"
+  ],
+  "historical_content_exceptions": [
+    {
+      "blob": "d4a3d67c5e6186f71686ff82bc3df1c770011e8a",
+      "rule": "network-address",
+      "fingerprint": "5b69f20f75ab4b52455261fa0b887b1974e7a35581cb435b5b888c18de8a6442",
+      "reason": "Previously audited synthetic authorization fixture; current fixture uses a documentation address."
+    }
+  ]
+}

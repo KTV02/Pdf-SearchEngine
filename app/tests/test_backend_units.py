@@ -2152,7 +2152,7 @@ def test_local_single_user_mode_grants_only_direct_host_access(backend_module, m
         principal = backend_module.get_current_principal()
         assert principal['type'] == 'local'
         assert principal['is_admin']
-    with app.test_request_context('/auth/me', environ_base={'REMOTE_ADDR': '172.20.0.2'}):
+    with app.test_request_context('/auth/me', environ_base={'REMOTE_ADDR': '203.0.113.2'}):
         assert not backend_module.get_current_principal()['is_admin']
     with app.test_request_context('/auth/me', environ_base={'REMOTE_ADDR': '127.0.0.1'},
                                   headers={'X-Forwarded-For': '198.51.100.8'}):

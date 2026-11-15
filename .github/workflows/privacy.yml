@@ -1,0 +1,22 @@
+name: Publication privacy
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install checksum-pinned scanner
+        run: python3 scripts/install_privacy_guards.py --scanner-only
+      - name: Test publication safeguards
+        run: python3 -m unittest discover -s scripts -p 'test_privacy_guard.py'
+      - name: Inspect all available history and public build inputs
+        run: python3 scripts/privacy_check.py --history
+      - name: Verify real Docker context exclusions with synthetic private files
+        run: python3 scripts/test_docker_contexts.py

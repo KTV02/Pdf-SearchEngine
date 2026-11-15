@@ -1,0 +1,4 @@
+# The repository root is intentionally not an application build context.
+# Use docker compose build, or the explicit service context documented in README.
+# This also excludes .git, private files, and future unrecognized content.
+**

@@ -1,0 +1,3 @@
+title = "PDF Search Engine secret scanning"
+[extend]
+useDefault = true

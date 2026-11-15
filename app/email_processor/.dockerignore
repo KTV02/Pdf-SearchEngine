@@ -1,3 +1,6 @@
-*
-!*.py
+# Explicit public source inputs only; update when adding a source module.
+**
+!processor_api.py
+!processor_module.py
+!task_runner.py
 !requirements.security.lock

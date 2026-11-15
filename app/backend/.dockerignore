@@ -1,3 +1,8 @@
-*
-!*.py
+# Explicit public source inputs only; update when adding a source module.
+**
+!app.py
+!browser_security.py
+!convert_folder.py
+!job_coordinator.py
+!task_queue.py
 !requirements.security.lock
