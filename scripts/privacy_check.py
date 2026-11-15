@@ -300,8 +300,9 @@ def inspect_snapshot(entries, policy, seen, profile, stage_bytes=None):
     objects = {p: obj for p, _, obj in entries}
     for index, (path, mode, obj) in enumerate(entries, 1):
         problem = path_problem(path, policy, mode)
-        if problem:
-            raise Blocked(f'File #{index}: {problem}; private filename suppressed.')
+        if problem or content_problems(path.encode(), policy, profile=profile):
+            reason = problem or 'potentially private source filename'
+            raise Blocked(f'File #{index}: {reason}; private filename suppressed.')
         if obj in seen:
             continue
         data = blob_bytes(obj)

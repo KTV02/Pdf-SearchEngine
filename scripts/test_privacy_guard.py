@@ -202,6 +202,16 @@ class PublicationTests(unittest.TestCase):
         ref = subprocess.run(['git', '-C', str(remote), 'rev-parse', '--verify', 'refs/heads/main'], capture_output=True)
         self.assertNotEqual(ref.returncode, 0)
 
+    def test_personal_information_in_source_filename_is_blocked_and_redacted(self):
+        email = 'private-owner' + '@' + 'mailhost' + '.com'
+        path = 'app/frontend/' + email + '.js'
+        self.write(path, '// synthetic public code\n')
+        self.git('add', path)
+        result = self.check('--staged')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'private source filename', result.stderr)
+        self.assertNotIn(email.encode(), result.stdout + result.stderr)
+
     def test_profile_refresh_does_not_approve_a_newly_committed_private_value(self):
         value = 'synthetic-new-value' + '-with-no-provider-pattern'
         self.write('app/.env', 'MAIL_TOKEN=' + value + '\n')
