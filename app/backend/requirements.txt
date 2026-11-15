@@ -1,0 +1,16 @@
+Flask
+flask-cors
+whoosh
+PyPDF2
+pytesseract
+pdf2image
+Pillow
+img2pdf
+psutil
+pycryptodome
+pytest
+requests
+reportlab
+fpdf
+pytest
+clamd

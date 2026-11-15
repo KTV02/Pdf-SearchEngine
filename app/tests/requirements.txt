@@ -1,0 +1,6 @@
+pytest
+requests
+reportlab
+pytest-mock
+fpdf
+PyMuPDF

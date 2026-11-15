@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Search Engine</title>
+    <link rel="stylesheet" href="styles.css"/>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <!--Import port of backend (settings) and domain-->
+    <script src="settings.js"></script>
+    <script src="config.js"></script>
+
+    <script src="utils.js"></script>
+    <script src="tasks.js"></script>
+    <script src="email.js"></script>
+    <script src="upload.js"></script>
+    <script src="search.js"></script>
+    <script src="admin.js"></script>
+    <script src="cloud.js"></script>
+    <script defer src="app.js"></script>
+</head>
+
+<body>
+
+    <div id="app">
+        <h1>PDF Search Engine</h1>
+
+
+
+
+        <!-- Global Task Status Popup -->
+        <div v-if="selectedIndex && currentTaskStatus && currentTaskStatus.length" class="task-popup"
+            :class="{ minimized: taskLogMinimized }">
+            <div class="task-popup-header">
+                <strong>Latest tasks for: {{ selectedIndex }}</strong>
+                <button @click="toggleTaskLog" :title="taskLogMinimized ? 'Expand task log' : 'Minimize task log'">
+                    {{ taskLogMinimized ? 'Expand' : 'Minimize' }}
+                </button>
+            </div>
+            <div v-if="!taskLogMinimized">
+                <div v-if="coordinatorStatus && coordinatorStatus.enabled"
+                    class="coordinator-banner"
+                    :class="coordinatorStatusClass()">
+                    <strong>Node-RED coordinator:</strong>
+                    <span>{{ coordinatorStatusLabel() }}</span>
+                    <span v-if="coordinatorStatus.status?.reason"> - {{ coordinatorStatus.status.reason }}</span>
+                    <span v-if="coordinatorPausedCount()"> - paused tasks: {{ coordinatorPausedCount() }}</span>
+                </div>
+                <div v-for="task in currentTaskStatus" :key="task.id" class="task-entry">
+                    <p><strong>Task ID:</strong> {{ task.id }}</p>
+                    <p>Status: <strong>{{ task.status }}</strong></p>
+                    <p v-if="task.created_at">Started: {{ formatTime(task.created_at) }}</p>
+                    <p v-if="task.updated_at">Updated: {{ formatTime(task.updated_at) }}</p>
+                    <p v-if="task.message">{{ task.message }}</p>
+                    <p v-if="task.coordinator?.enabled && (task.status === 'blocked' || task.status === 'paused')"
+                        class="task-coordinator-note">
+                        Waiting for Node-RED
+                        <span v-if="task.coordinator.reason"> - {{ task.coordinator.reason }}</span>
+                    </p>
+                    <p v-if="task.result?.remaining_documents">
+                        Remaining: {{ task.result.remaining_documents }} documents
+                        <span v-if="task.result?.estimated_remaining_seconds">
+                            (about {{ formatDuration(task.result.estimated_remaining_seconds) }})
+                        </span>
+                    </p>
+                    <p v-if="task.result?.message" style="color: green;">✅ {{ task.result.message }}</p>
+                    <p v-if="task.status === 'failed'" style="color: red;">❌ {{ task.message }}</p>
+                    <button @click="toggleTaskDetails(task.id)" style="margin-top: 4px;">
+                        {{ isTaskDetailsVisible(task.id) ? 'Hide details' : 'Show details' }}
+                    </button>
+                    <div v-if="isTaskDetailsVisible(task.id)"
+                        style="margin-top: 8px; background: #f7f7f7; border: 1px solid #ddd; padding: 8px; border-radius: 4px;">
+                        <p v-if="task.result?.source_file"><strong>Source:</strong> {{ task.result.source_file }}</p>
+                        <div v-if="task.result?.processed_files?.length">
+                            <strong>Indexed documents:</strong>
+                            <ul>
+                                <li v-for="file in task.result.processed_files" :key="'processed-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.duplicate_files?.length">
+                            <strong>Duplicate documents skipped:</strong>
+                            <ul>
+                                <li v-for="file in task.result.duplicate_files" :key="'duplicate-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.failed_files?.length">
+                            <strong>Failed documents:</strong>
+                            <ul>
+                                <li v-for="file in task.result.failed_files" :key="'failed-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.failed_details?.length">
+                            <strong>Failure details:</strong>
+                            <ul>
+                                <li v-for="item in task.result.failed_details" :key="'failure-detail-' + task.id + '-' + item.file">
+                                    {{ item.file }}: {{ item.error }}
+                                </li>
+                            </ul>
+                        </div>
+                        <p v-if="task.result?.deleted_path"><strong>Deleted file backup:</strong> {{ task.result.deleted_path }}</p>
+                        <p v-if="task.result?.backup_path"><strong>Original backup:</strong> {{ task.result.backup_path }}</p>
+                        <p v-if="task.result?.appended_to"><strong>Appended to:</strong> {{ task.result.appended_to }}</p>
+                        <div v-if="task.result?.remaining_files?.length">
+                            <strong>Remaining documents:</strong>
+                            <ul>
+                                <li v-for="file in task.result.remaining_files" :key="'remaining-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.reindexed_files?.length">
+                            <strong>Reindexed documents:</strong>
+                            <ul>
+                                <li v-for="file in task.result.reindexed_files" :key="'reindexed-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.added_files?.length">
+                            <strong>Cloud documents added:</strong>
+                            <ul>
+                                <li v-for="file in task.result.added_files" :key="'cloud-added-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.updated_files?.length">
+                            <strong>Cloud documents updated:</strong>
+                            <ul>
+                                <li v-for="file in task.result.updated_files" :key="'cloud-updated-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <div v-if="task.result?.removed_files?.length">
+                            <strong>Cloud documents removed:</strong>
+                            <ul>
+                                <li v-for="file in task.result.removed_files" :key="'cloud-removed-' + task.id + '-' + file">{{ file }}</li>
+                            </ul>
+                        </div>
+                        <p v-if="task.result?.checked_documents !== undefined">
+                            Checked {{ task.result.checked_documents }} of {{ task.result.total_documents }} documents.
+                        </p>
+                        <pre style="white-space: pre-wrap; max-height: 180px; overflow: auto;">{{ formatTaskDetails(task) }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab" :class="{ active: activeTab === 'search' }" @click="activeTab = 'search'">Search</div>
+            <div class="tab" :class="{ active: activeTab === 'folder' }" @click="activeTab = 'folder'">Folder</div>
+            <div class="tab" :class="{ active: activeTab === 'upload' }" @click="activeTab = 'upload'">Upload</div>
+            <div class="tab" :class="{ active: activeTab === 'email' }" @click="activeTab = 'email'">Email</div>
+            <div class="tab" :class="{ active: activeTab === 'admin' }" @click="activeTab = 'admin'">Admin</div>
+        </div>
+
+        <!-- Search Tab -->
+        <div class="content" :class="{ active: activeTab === 'search' }">
+            <div class="search-bar">
+                <select v-model="selectedIndex">
+                    <option v-for="index in indices" :value="index" :key="index">{{ index }}</option>
+                </select>
+                <input v-model="query" placeholder="Search for documents..." @keyup.enter="search">
+            </div>
+            <div v-if="selectedIndexConfig" class="index-mode-badge">
+                {{ currentIndexModeLabel }}
+                <span v-if="cloudSyncEnabled && selectedIndexConfig.cloud.last_sync_at">
+                    Last cloud sync: {{ formatTime(selectedIndexConfig.cloud.last_sync_at) }}
+                </span>
+            </div>
+
+            <button @click="toggleSimilarityUpload" :disabled="similarityLoading">
+                {{ similarityUploadVisible ? 'Hide Similarity Search' : 'Find Similar PDF' }}
+            </button>
+            <div v-if="similarityUploadVisible" class="similarity-upload">
+                <input type="file" accept=".pdf" @change="handleSimilarityFileUpload">
+                <button @click="searchSimilarFromFile" :disabled="similarityLoading">Search</button>
+                <button @click="cancelSimilarityUpload" :disabled="similarityLoading">Cancel</button>
+            </div>
+
+            <div class="options">
+                <button>Options</button>
+                <div class="options-content">
+                    <button @click="downloadAll">Download All PDFs</button>
+                    <!-- <button @click="verifyIndex" :disabled="loading">Verify Index</button>-->
+                    <button @click="processTmp" class="dropdown-item">Process TMP Folder</button>
+                    <button @click="optimizeIndex" class="dropdown-item">🧹 Optimize Index</button>
+                    <button @click="rebuildIndex" class="dropdown-item text-danger">♻️ Rebuild Index</button>
+                </div>
+
+            </div>
+            <label class="low-data-toggle">
+                <input type="checkbox" v-model="lowDataMode">
+                <span>Low Data Preview</span>
+            </label>
+        </div>
+
+        <div v-if="progressMessage" style="margin-top: 20px;">
+            <div class="progress-bar">
+                <div class="progress" :style="{ width: progressPercentage + '%' }"></div>
+            </div>
+            <p>{{ progressMessage }}</p>
+            <ul v-if="missingFiles.length > 0">
+                <h4>Missing Files Reindexed:</h4>
+                <li v-for="file in missingFiles" :key="file">{{ file }}</li>
+            </ul>
+        </div>
+
+        <div v-if="activeTab === 'folder'" class="folder-view">
+            <div class="folder-toolbar">
+                <select v-model="selectedIndex">
+                    <option v-for="index in indices" :value="index" :key="'folder-index-' + index">{{ index }}</option>
+                </select>
+                <button @click="openFolderPath('')" :disabled="folderLoading">Root</button>
+                <button @click="syncCloudNow" :disabled="!cloudSyncEnabled || cloudSyncStarting || !selectedIndexWritable">Sync Cloud</button>
+                <span class="index-mode-badge">{{ currentIndexModeLabel }}</span>
+            </div>
+
+            <div v-if="folderTree" class="breadcrumbs">
+                <button @click="openFolderPath('')" :disabled="folderLoading">Root</button>
+                <button v-for="crumb in folderTree.breadcrumbs" :key="'crumb-' + crumb.path"
+                    @click="openFolderPath(crumb.path)" :disabled="folderLoading">
+                    {{ crumb.name }}
+                </button>
+            </div>
+
+            <div v-if="folderLoading" class="admin-status">Loading folder...</div>
+            <div v-else-if="folderTree">
+                <div v-if="folderTree.folders.length === 0 && folderTree.files.length === 0" class="admin-status">
+                    No documents in this folder.
+                </div>
+
+                <div class="folder-list" v-if="folderTree.folders.length">
+                    <button class="folder-row" v-for="folder in folderTree.folders" :key="'folder-' + folder.path"
+                        @click="openFolder(folder)">
+                        <span class="folder-name">{{ folder.name }}</span>
+                        <span>{{ folder.document_count }} document{{ folder.document_count === 1 ? '' : 's' }}</span>
+                        <span>{{ formatSource(folder.source) }}</span>
+                    </button>
+                </div>
+
+                <div class="file-table" v-if="folderTree.files.length">
+                    <div class="file-row file-row-header">
+                        <span>Name</span>
+                        <span>Size</span>
+                        <span>Changed</span>
+                        <span>Source</span>
+                        <span>Actions</span>
+                    </div>
+                    <div class="file-row" v-for="file in folderTree.files" :key="'file-' + file.id">
+                        <span class="file-name">{{ file.title }}</span>
+                        <span>{{ formatBytes(file.size) }}</span>
+                        <span>{{ formatTime(file.modified_at) }}</span>
+                        <span>{{ formatSource(file.source) }}</span>
+                        <span class="folder-actions">
+                            <button @click="previewFolderFile(file, 'all')">Preview</button>
+                            <button @click="download(file)">Download</button>
+                            <button @click="showSimilarFromFolder(file)">Similar</button>
+                            <button @click="deleteFolderDocument(file)">Delete</button>
+                        </span>
+                    </div>
+                </div>
+
+                <div v-if="folderPreview" class="folder-preview">
+                    <div class="folder-preview-header">
+                        <strong>{{ folderPreview.title }}</strong>
+                        <button @click="folderPreview = null">Close</button>
+                    </div>
+                    <iframe :src="folderPreview.url" width="100%" height="500px"></iframe>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="activeTab === 'search'">
+            <div v-if="searchMode === 'similar'" class="search-context">
+                <strong>Similarity search</strong>
+                <span>for "{{ similaritySourceTitle }}"</span>
+            </div>
+            <div v-if="similarityLoading" class="search-context">
+                Finding similar documents...
+            </div>
+
+            <ul>
+                <li v-for="(result, index) in results" :key="result.path">
+                    <h3>{{ result.title }}</h3>
+                    <p v-if="searchMode === 'similar'">Similarity Score: {{ result.score.toFixed(2) }}</p>
+                    <p v-else>Relevance Score: {{ result.score.toFixed(2) }}</p>
+
+                    <!-- Display extracted years -->
+                    <p v-if="result.years.length > 0">Years: {{ result.years.join(', ') }}</p>
+                    <p v-else>No dates found</p>
+                    <p class="result-meta">
+                        {{ formatSource(result.source) }} - {{ result.virtual_path }}
+                        <span v-if="result.size"> - {{ formatBytes(result.size) }}</span>
+                        <span v-if="result.modified_at"> - Changed {{ formatTime(result.modified_at) }}</span>
+                    </p>
+
+                    <div class="result-actions">
+                        <button @click="previewPage(result, index)">Preview Page</button>
+                        <button @click="previewPdf(result, index)">Preview PDF</button>
+                        <button @click="download(result)">Download PDF</button>
+                        <button @click="showSimilar(result)">Show Similar</button>
+                        <button @click="toggleAppendControl(result)">
+                            {{ isAppendControlVisible(result) ? 'Hide Append' : 'Append PDF' }}
+                        </button>
+                        <button @click="deleteDocument(result)">Delete</button>
+                    </div>
+                    <div v-if="isAppendControlVisible(result)" class="append-control">
+                        <input type="file" accept=".pdf" @change="handleAppendFileUpload(result, $event)" :disabled="loading">
+                        <button @click="appendDocument(result)" :disabled="loading">Append</button>
+                        <button @click="cancelAppendControl(result)" :disabled="loading">Cancel</button>
+                    </div>
+
+                    <!-- Conditionally render the preview -->
+                    <div v-if="result.previewVisible">
+                        <h4 v-if="result.previewMode === 'pdf'">PDF Preview</h4>
+                        <h4 v-else>Page Preview</h4>
+                        <iframe :src="result.previewUrl" width="100%" height="500px"></iframe>
+
+                        <!-- Add page selection and download -->
+                        <div v-if="result.previewMode === 'pdf'">
+                            <h4>Select Pages to Download</h4>
+                            <input v-model="result.selectedPages" placeholder="Enter page numbers (e.g., 1,2,5)" />
+                            <button @click="downloadSelectedPages(result)">Download Selected Pages</button>
+                        </div>
+                    </div>
+                </li>
+            </ul>
+
+            <div v-if="results.length === 0 && searchSubmitted && !similarityLoading && searchMode === 'keyword'" style="text-align: center; color: #555; margin-top: 20px;">
+                No results found for "{{ query }}". Try a different search term.
+            </div>
+            <div v-if="results.length === 0 && searchSubmitted && !similarityLoading && searchMode === 'similar'" style="text-align: center; color: #555; margin-top: 20px;">
+                No similar documents found for "{{ similaritySourceTitle }}".
+            </div>
+
+
+
+            <div v-if="previewUrl">
+                <h3>Preview</h3>
+                <iframe :src="previewUrl" width="100%" height="500px"></iframe>
+
+                <div>
+                    <h4>Select Pages to Download</h4>
+                    <input v-model="selectedPages" placeholder="Enter page numbers (e.g., 1,2,5)" />
+                    <button @click="downloadSelectedPages" style="margin-top: 10px;">Download Selected Pages</button>
+                </div>
+                <button @click="exitPreview" style="margin-top: 10px; background-color: #FF5733; color: white;">Exit
+                    Preview</button>
+            </div>
+
+        </div>
+
+        <!-- Upload Tab -->
+        <div class="content" :class="{ active: activeTab === 'upload' }">
+            <h3>Upload Documents</h3>
+            <div class="index-mode-badge">{{ currentIndexModeLabel }}</div>
+            <p v-if="!uploadsEnabled" class="admin-status">
+                Uploads are disabled for cloud-only indices. Switch this index to hybrid mode to add uploaded documents.
+            </p>
+            <p>You can upload a single PDF or a .zip file containing multiple PDFs.
+            </p>
+            <form @submit.prevent="uploadDocument" :class="{ disabled: loading || !uploadsEnabled }">
+                <select v-model="selectedIndex">
+                    <option v-for="index in indices" :value="index" :key="index">{{ index }}</option>
+                </select>
+                <input type="file" @change="handleFileUpload" accept=".pdf,.zip" :disabled="loading || !uploadsEnabled">
+                <button type="submit" :disabled="loading || !uploadsEnabled">Upload</button>
+            </form>
+        </div>
+
+        <!-- Email Tab -->
+        <div class="content" :class="{ active: activeTab === 'email' }">
+            <h3>Email Tasks for Index: {{ selectedIndex }}</h3>
+
+            <div v-if="selectedIndex">
+                <div style="margin-bottom: 20px;">
+                    <h4>📬 New Email Config</h4>
+                    <input v-model="emailForm.email" placeholder="Email address" required><br>
+                    <input v-model="emailForm.password" type="password" placeholder="Password" required><br>
+                    <input v-model="emailForm.imap_server" placeholder="IMAP Server (e.g., imap.gmail.com)"
+                        required><br>
+                    <input v-model="emailForm.imap_port" type="number" placeholder="IMAP Port (e.g., 993)" required><br>
+                    <button :disabled="!isEmailFormValid" @click="createEmailTask('digitalize')">📥 Digitalize
+                        Inbox</button>
+                    <button :disabled="!isEmailFormValid" @click="createEmailTask('monitor')">📡 Monitor Inbox</button>
+                </div>
+
+                <h4 style="margin-top: 20px;">📋 Active Monitoring Tasks</h4>
+                <ul>
+                    <li v-for="task in emailTasks" :key="task.task_id">
+                        🆔 {{ task.task_id }} — {{ task.config.email }} <br>
+                        🔁 Mode: <strong>{{ task.mode }}</strong> <br>
+                        ⏳ Started: <strong>{{ formatTime(task.start_time) }}</strong>
+                        <button @click="stopEmailTask(task.task_id)">❌ Stop</button>
+                    </li>
+                </ul>
+            </div>
+            <div v-else>
+                <p>Please select an index to manage email tasks.</p>
+            </div>
+        </div>
+
+        <!-- Admin Tab -->
+        <div class="content" :class="{ active: activeTab === 'admin' }">
+            <div class="admin-current-user">
+                Signed in as <strong>{{ currentUser.login || currentUser.id }}</strong>
+            </div>
+
+            <template v-if="currentUser.is_admin">
+                <h3>Storage</h3>
+                <div v-if="storageLoading" class="admin-status">Loading storage configuration...</div>
+                <div v-if="storageConfig && !storageLoading" class="admin-storage-panel">
+                    <div class="storage-path-grid">
+                        <div>
+                            <strong>PDFs</strong>
+                            <span>{{ storageConfig.storage.pdf_folder }}</span>
+                        </div>
+                        <div>
+                            <strong>Index</strong>
+                            <span>{{ storageConfig.storage.index_folder }}</span>
+                        </div>
+                        <div>
+                            <strong>Deleted Files</strong>
+                            <span>{{ storageConfig.storage.deleted_folder }}</span>
+                        </div>
+                        <div>
+                            <strong>Config</strong>
+                            <span>{{ storageConfig.storage.storage_config_path }}</span>
+                        </div>
+                    </div>
+
+                    <div class="backup-settings">
+                        <label class="checkbox-row">
+                            <input type="checkbox" v-model="storageConfig.backup.enabled">
+                            Scheduled backups
+                        </label>
+                        <label>
+                            Backup target folder
+                            <input v-model="storageConfig.backup.target_folder" placeholder="/app/backups" :disabled="storageSaving">
+                        </label>
+                        <div class="backup-settings-row">
+                            <label>
+                                Interval hours
+                                <input type="number" min="1" step="1" v-model.number="storageConfig.backup.interval_hours" :disabled="storageSaving">
+                            </label>
+                            <label>
+                                Snapshots kept
+                                <input type="number" min="1" step="1" v-model.number="storageConfig.backup.retention_count" :disabled="storageSaving">
+                            </label>
+                        </div>
+                        <label class="checkbox-row">
+                            <input type="checkbox" v-model="storageConfig.backup.include_deleted">
+                            Include deleted-file backups
+                        </label>
+                        <label class="checkbox-row">
+                            <input type="checkbox" v-model="storageConfig.backup.include_configs">
+                            Include access and email configs
+                        </label>
+                        <div class="admin-action-group">
+                            <button @click="saveStorageConfig" :disabled="storageSaving || storageLoading">Save Backup Settings</button>
+                            <button @click="runBackupNow" :disabled="backupStarting || storageSaving">Run Backup Now</button>
+                        </div>
+                        <div class="admin-status" v-if="storageConfig.backup.last_status">
+                            Last backup: <strong>{{ storageConfig.backup.last_status }}</strong>
+                            <span v-if="storageConfig.backup.last_run_at">at {{ formatTime(storageConfig.backup.last_run_at) }}</span>
+                            <div v-if="storageConfig.backup.last_message">{{ storageConfig.backup.last_message }}</div>
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <h3>Index Mode</h3>
+            <div v-if="!selectedIndex" class="admin-status">Create or select an index to manage its mode.</div>
+            <div v-if="indexConfigLoading" class="admin-status">Loading index mode settings...</div>
+            <div v-if="selectedIndex && indexConfigForm && !indexConfigLoading" class="admin-storage-panel">
+                <div v-if="!selectedIndexWritable" class="admin-status">
+                    You can view this index, but you cannot change its mode or cloud connection.
+                </div>
+                <div class="admin-action-group">
+                    <label>
+                        Index
+                        <select v-model="selectedIndex">
+                            <option v-for="index in indices" :value="index" :key="'mode-index-' + index">{{ index }}</option>
+                        </select>
+                    </label>
+                    <label>
+                        Mode
+                        <select v-model="indexConfigForm.mode" :disabled="indexConfigSaving || !selectedIndexWritable">
+                            <option value="standalone">Standalone</option>
+                            <option value="cloud">Cloud</option>
+                            <option value="hybrid">Hybrid</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div v-if="indexConfigForm.mode === 'cloud' || indexConfigForm.mode === 'hybrid'" class="backup-settings">
+                    <div class="backup-settings-row">
+                        <label>
+                            Cloud provider
+                            <select v-model="indexConfigForm.cloud.provider" @change="handleCloudProviderChange" :disabled="indexConfigSaving || !selectedIndexWritable">
+                                <option v-for="provider in availableCloudProviders"
+                                    :key="'cloud-provider-' + provider.id"
+                                    :value="provider.id">
+                                    {{ provider.label }}{{ provider.requires_login && !provider.configured ? ' (setup needed)' : '' }}
+                                </option>
+                            </select>
+                        </label>
+                        <label>
+                            Display name
+                            <input v-model="indexConfigForm.cloud.display_root_name" placeholder="drive" :disabled="indexConfigSaving || !selectedIndexWritable">
+                        </label>
+                    </div>
+                    <div v-if="selectedProviderRequiresAdmin" class="admin-status">
+                        Mounted or synced host folders can only be configured by an admin. Choose OneDrive, Google Drive, or Dropbox to connect your own cloud account.
+                    </div>
+
+                    <div v-if="isMountedFolderConfig()" class="cloud-provider-panel">
+                        <label>
+                            Cloud folder path
+                            <input v-model="indexConfigForm.cloud.root_path" placeholder="/app/cloud/drive" :disabled="indexConfigSaving || !selectedIndexWritable || selectedProviderRequiresAdmin">
+                        </label>
+                        <label>
+                            Hidden preview folder
+                            <input v-model="indexConfigForm.cloud.preview_folder" placeholder="Defaults to .pdfsearchengine/previews inside the cloud folder" :disabled="indexConfigSaving || !selectedIndexWritable || selectedProviderRequiresAdmin">
+                        </label>
+                    </div>
+
+                    <div v-if="isLoginProviderConfig()" class="cloud-provider-panel">
+                        <div v-if="canManageProviderSettings && isOneDriveConfig()" class="cloud-registration-box">
+                            <div class="cloud-panel-title">
+                                <strong>OneDrive provider registration</strong>
+                                <button v-if="onedriveApplicationIdMissing()" type="button" class="info-button" title="OneDrive app setup" @click="toggleCloudHelp('onedrive-entra')">i</button>
+                            </div>
+                            <div v-if="showCloudHelp('onedrive-entra')" class="cloud-info-box">
+                                <p>Create a free Microsoft Entra app registration, choose personal Microsoft accounts or personal plus work accounts, enable public client flows, add delegated permissions offline_access, User.Read, and Files.ReadWrite, then paste the Application/client ID here. For personal OneDrive, use tenant consumers.</p>
+                            </div>
+                            <div class="backup-settings-row">
+                                <label>
+                                    Microsoft application ID
+                                    <input v-model="cloudProviderSettings.onedrive.client_id" placeholder="Application/client ID" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                </label>
+                                <label>
+                                    Tenant
+                                    <input v-model="cloudProviderSettings.onedrive.tenant" placeholder="common" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                </label>
+                            </div>
+                            <label>
+                                Permissions
+                                <input v-model="cloudProviderSettings.onedrive.scopes" placeholder="offline_access User.Read Files.ReadWrite" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <label>
+                                Request timeout seconds
+                                <input type="number" min="5" step="5" v-model.number="cloudProviderSettings.onedrive.request_timeout_seconds" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <div class="admin-action-group">
+                                <button @click="saveCloudProviderSettings('onedrive')" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                    Save OneDrive Registration
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="canManageProviderSettings && isGoogleDriveConfig()" class="cloud-registration-box">
+                            <div class="cloud-panel-title">
+                                <strong>Google Drive provider registration</strong>
+                            </div>
+                            <div class="cloud-info-box">
+                                <p>Register an OAuth client in Google Cloud, enable the Google Drive API, add this callback URL as an authorized redirect URL, and request the Drive permission shown below.</p>
+                                <code>{{ providerCallbackUrl('google_drive') }}</code>
+                            </div>
+                            <div class="backup-settings-row">
+                                <label>
+                                    Google OAuth client ID
+                                    <input v-model="cloudProviderSettings.google_drive.client_id" placeholder="OAuth client ID" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                </label>
+                                <label>
+                                    Google OAuth client secret
+                                    <input v-model="cloudProviderSettings.google_drive.client_secret" type="password" placeholder="Optional client secret" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                </label>
+                            </div>
+                            <div v-if="providerSavedSecretText('google_drive')" class="admin-status">{{ providerSavedSecretText('google_drive') }}</div>
+                            <label>
+                                Redirect URL override
+                                <input v-model="cloudProviderSettings.google_drive.redirect_uri" placeholder="Leave empty to use the callback URL above" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <label>
+                                Permissions
+                                <input v-model="cloudProviderSettings.google_drive.scopes" placeholder="https://www.googleapis.com/auth/drive" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <label>
+                                Request timeout seconds
+                                <input type="number" min="5" step="5" v-model.number="cloudProviderSettings.google_drive.request_timeout_seconds" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <div class="admin-action-group">
+                                <button @click="saveCloudProviderSettings('google_drive')" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                    Save Google Drive Registration
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="canManageProviderSettings && isDropboxConfig()" class="cloud-registration-box">
+                            <div class="cloud-panel-title">
+                                <strong>Dropbox provider registration</strong>
+                            </div>
+                            <div class="cloud-info-box">
+                                <p>Create a Dropbox app with Full Dropbox access, add this callback URL as a redirect URI, and enable the permissions shown below.</p>
+                                <code>{{ providerCallbackUrl('dropbox') }}</code>
+                            </div>
+                            <div class="backup-settings-row">
+                                <label>
+                                    Dropbox app key
+                                    <input v-model="cloudProviderSettings.dropbox.app_key" placeholder="App key" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                </label>
+                                <label>
+                                    Dropbox app secret
+                                    <input v-model="cloudProviderSettings.dropbox.app_secret" type="password" placeholder="Optional app secret" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                </label>
+                            </div>
+                            <div v-if="providerSavedSecretText('dropbox')" class="admin-status">{{ providerSavedSecretText('dropbox') }}</div>
+                            <label>
+                                Redirect URL override
+                                <input v-model="cloudProviderSettings.dropbox.redirect_uri" placeholder="Leave empty to use the callback URL above" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <label>
+                                Permissions
+                                <input v-model="cloudProviderSettings.dropbox.scopes" placeholder="account_info.read files.metadata.read files.content.read files.content.write" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <label>
+                                Request timeout seconds
+                                <input type="number" min="5" step="5" v-model.number="cloudProviderSettings.dropbox.request_timeout_seconds" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                            </label>
+                            <div class="admin-action-group">
+                                <button @click="saveCloudProviderSettings('dropbox')" :disabled="cloudProviderSettingsSaving || indexConfigSaving">
+                                    Save Dropbox Registration
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="!canManageProviderSettings && providerStatusMessage(indexConfigForm.cloud.provider)" class="admin-status">
+                            {{ providerStatusMessage(indexConfigForm.cloud.provider) }} Ask an admin to finish provider registration.
+                        </div>
+
+                        <div class="admin-action-group">
+                            <label>
+                                {{ providerAccountLabel(indexConfigForm.cloud.provider) }}
+                                <select v-model="indexConfigForm.cloud.connection_id" :disabled="indexConfigSaving || cloudProviderLoading || !selectedIndexWritable">
+                                    <option value="">Select account</option>
+                                    <option v-for="connection in connectedCloudConnections(indexConfigForm.cloud.provider)"
+                                        :key="indexConfigForm.cloud.provider + '-connection-' + connection.id"
+                                        :value="connection.id">
+                                        {{ cloudConnectionLabel(connection) }}
+                                    </option>
+                                </select>
+                            </label>
+                            <button @click="startCloudConnection(indexConfigForm.cloud.provider)" :disabled="cloudConnectionStarting || cloudProviderLoading || indexConfigSaving || !selectedIndexWritable || !cloudProviderConfigured(indexConfigForm.cloud.provider)">
+                                {{ providerConnectLabel(indexConfigForm.cloud.provider) }}
+                            </button>
+                            <button v-if="isOneDriveConfig()" type="button" class="info-button" title="Personal OneDrive help" @click="toggleCloudHelp('personal-onedrive')">i</button>
+                            <button @click="fetchCloudProviders" :disabled="cloudProviderLoading || indexConfigSaving">Refresh</button>
+                        </div>
+
+                        <div v-if="showCloudHelp('personal-onedrive')" class="cloud-info-box">
+                            <p>To connect a personal OneDrive account, save the OneDrive provider registration with tenant consumers, click Connect OneDrive, complete the Microsoft login, select the connected account, enter a folder path relative to My files such as Documents/PDFs, then save the index mode.</p>
+                        </div>
+
+                        <div v-if="canManageProviderSettings && selectedCloudProvider()?.missing_configuration" class="admin-status">
+                            {{ selectedCloudProvider().missing_configuration }}
+                        </div>
+                        <div v-if="cloudLoginSession" class="cloud-login-box">
+                            <strong>{{ providerLabel(cloudLoginSession.provider) }} login: {{ cloudLoginSession.status }}</strong>
+                            <div v-if="cloudLoginSession.user_code" class="cloud-login-code">{{ cloudLoginSession.user_code }}</div>
+                            <a v-if="cloudLoginSession.verification_uri" :href="cloudLoginSession.verification_uri" target="_blank" rel="noopener">
+                                {{ cloudLoginLinkLabel(cloudLoginSession.provider) }}
+                            </a>
+                            <a v-if="cloudLoginSession.authorization_url" :href="cloudLoginSession.authorization_url" target="_blank" rel="noopener">
+                                {{ cloudLoginLinkLabel(cloudLoginSession.provider) }}
+                            </a>
+                            <p v-if="cloudLoginSession.callback_url">Callback URL: {{ cloudLoginSession.callback_url }}</p>
+                            <p v-if="cloudLoginSession.message">{{ cloudLoginSession.message }}</p>
+                            <p v-if="cloudLoginSession.last_error">{{ cloudLoginSession.last_error }}</p>
+                        </div>
+                        <label>
+                            {{ providerRemotePathLabel(indexConfigForm.cloud.provider) }}
+                            <input v-model="indexConfigForm.cloud.remote_path" :placeholder="providerRemotePathPlaceholder(indexConfigForm.cloud.provider)" :disabled="indexConfigSaving || !selectedIndexWritable">
+                        </label>
+                        <div v-if="indexConfigForm.cloud.managed_root_path || indexConfigForm.cloud.root_path" class="cloud-managed-path">
+                            <span>Host synced folder</span>
+                            <code>{{ indexConfigForm.cloud.managed_root_path || indexConfigForm.cloud.root_path }}</code>
+                        </div>
+                    </div>
+                    <div class="backup-settings-row">
+                        <label>
+                            Sync interval seconds
+                            <input type="number" min="30" step="30" v-model.number="indexConfigForm.cloud.sync_interval_seconds" :disabled="indexConfigSaving || !selectedIndexWritable">
+                        </label>
+                        <label class="checkbox-row">
+                            <input type="checkbox" v-model="indexConfigForm.cloud.sync_enabled" :disabled="indexConfigSaving || !selectedIndexWritable">
+                            Automatic sync
+                        </label>
+                    </div>
+                    <label class="checkbox-row">
+                        <input type="checkbox" v-model="indexConfigForm.cloud.delete_standalone_duplicates" :disabled="indexConfigSaving || !selectedIndexWritable">
+                        Prefer identical cloud files over uploaded copies
+                    </label>
+                    <div class="admin-status" v-if="selectedIndexConfig?.cloud?.last_sync_status">
+                        Last cloud sync: <strong>{{ selectedIndexConfig.cloud.last_sync_status }}</strong>
+                        <span v-if="selectedIndexConfig.cloud.last_sync_at">at {{ formatTime(selectedIndexConfig.cloud.last_sync_at) }}</span>
+                        <div v-if="selectedIndexConfig.cloud.last_sync_message">{{ selectedIndexConfig.cloud.last_sync_message }}</div>
+                    </div>
+                    <div class="admin-status" v-if="indexConfigDirty">
+                        Save index mode to apply the selected cloud account and folder before syncing.
+                    </div>
+                </div>
+
+                <div class="admin-action-group">
+                    <button @click="saveIndexConfig" :disabled="indexConfigSaving || !selectedIndexWritable || selectedProviderRequiresAdmin">Save Index Mode</button>
+                    <button @click="syncCloudNow" :disabled="!cloudSyncEnabled || cloudSyncStarting || indexConfigSaving || !selectedIndexWritable">
+                        {{ indexConfigDirty ? 'Save & Sync Cloud Now' : 'Sync Cloud Now' }}
+                    </button>
+                </div>
+            </div>
+
+            <h3>{{ currentUser.is_admin ? 'Access Control' : 'Create Index' }}</h3>
+            <div class="admin-actions">
+                <div class="admin-action-group">
+                    <input v-model="adminNewIndexName" placeholder="New index name" :disabled="adminSaving">
+                    <button @click="createAdminIndex" :disabled="adminSaving">Add Index</button>
+                </div>
+                <div v-if="currentUser.is_admin" class="admin-action-group">
+                    <input v-model="adminNewUserLogin" placeholder="Tailscale email" :disabled="adminSaving">
+                    <button @click="addAccessUser" :disabled="adminSaving">Add User</button>
+                    <button @click="saveAdminAccessConfig" :disabled="adminSaving || adminLoading">Save</button>
+                </div>
+            </div>
+
+            <div v-if="currentUser.is_admin && adminLoading" class="admin-status">Loading access configuration...</div>
+
+            <div v-if="currentUser.is_admin && adminConfig && !adminLoading" class="admin-panel">
+                <div class="admin-index-list">
+                    <strong>Indices</strong>
+                    <span v-for="index in adminConfig.indices" :key="'admin-index-' + index">{{ index }}</span>
+                </div>
+
+                <div v-if="adminUserEntries.length === 0" class="admin-status">
+                    No Tailscale users configured yet.
+                </div>
+
+                <div v-for="entry in adminUserEntries" :key="entry.login" class="admin-user-card">
+                    <div class="admin-user-header">
+                        <strong>{{ entry.login }}</strong>
+                        <label>
+                            <input type="checkbox" v-model="entry.permissions.admin">
+                            Admin
+                        </label>
+                        <button @click="removeAccessUser(entry.login)" :disabled="adminSaving">Remove</button>
+                    </div>
+
+                    <div class="permission-grid">
+                        <div v-for="index in adminConfig.indices" :key="entry.login + '-' + index" class="permission-row">
+                            <span>{{ index }}</span>
+                            <label>
+                                <input type="checkbox"
+                                    :checked="userHasIndexScope(entry.login, 'read', index)"
+                                    @change="setUserIndexScope(entry.login, 'read', index, $event.target.checked)">
+                                Read
+                            </label>
+                            <label>
+                                <input type="checkbox"
+                                    :checked="userHasIndexScope(entry.login, 'write', index)"
+                                    @change="setUserIndexScope(entry.login, 'write', index, $event.target.checked)">
+                                Write
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- Loading Overlay -->
+        <div v-if="loading" class="loading-overlay">
+            Processing your document, please wait...
+        </div>
+    </div>
+</body>
+
+</html>

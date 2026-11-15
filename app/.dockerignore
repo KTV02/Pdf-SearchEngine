@@ -1,0 +1,12 @@
+*
+!backend/
+!backend/*.py
+!backend/requirements.txt
+!email_processor/
+!email_processor/*.py
+!email_processor/requirements.txt
+!tests/
+!tests/*.py
+!tests/requirements.txt
+!docker-compose.yml
+!pytest.ini

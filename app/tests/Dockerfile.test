@@ -1,0 +1,22 @@
+# Dockerfile.test
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Copy app code needed by unit tests plus the test suite.
+COPY ./backend ./backend
+COPY ./email_processor ./email_processor
+COPY ./tests ./tests
+COPY ./docker-compose.yml ./docker-compose.yml
+COPY ./pytest.ini ./pytest.ini
+
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir \
+    -r backend/requirements.txt \
+    -r email_processor/requirements.txt \
+    -r tests/requirements.txt
+RUN rm -rf /app/index_folder/test_index
+RUN rm -rf /app/ocr/converted/test_index
+RUN rm -rf /app/tmp/test_index
+
+CMD ["pytest", "-s", "-v", "tests"]

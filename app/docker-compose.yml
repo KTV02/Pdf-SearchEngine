@@ -1,0 +1,174 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+    - 127.0.0.1:${BACKEND_PORT:-5050}:5050
+    volumes:
+    - ${PDF_STORAGE_HOST_PATH:-./data/ocr}:/app/ocr
+    - ${INDEX_STORAGE_HOST_PATH:-./data/index}:/app/index_folder
+    - ${TMP_STORAGE_HOST_PATH:-./data/tmp}:/app/tmp
+    - ${LOG_STORAGE_HOST_PATH:-./data/logs}:/app/logs
+    - ${BACKUP_STORAGE_HOST_PATH:-./data/backups}:/app/backups
+    - ${CLOUD_STORAGE_HOST_PATH:-./data/cloud}:/app/cloud
+    - ${CONFIG_HOST_PATH:-./data/config}:/app/config
+    - ${EMAIL_CONFIG_HOST_PATH:-./data/email_configs}:/app/email_configs
+    environment:
+    - MAIL_TOKEN=${MAIL_TOKEN:-local-mail-token}
+    - TEST_BYPASS_TOKEN=${TEST_BYPASS_TOKEN:-}
+    - PDF_FOLDER=${PDF_FOLDER:-/app/ocr/converted}
+    - DELETED_FOLDER=${DELETED_FOLDER:-/app/ocr/deleted}
+    - INDEX_FOLDER=${INDEX_FOLDER:-/app/index_folder}
+    - TMP_FOLDER=${TMP_FOLDER:-/app/tmp}
+    - LOG_FOLDER=${LOG_FOLDER:-/app/logs}
+    - EMAIL_CONFIGS=${EMAIL_CONFIGS:-/app/email_configs}
+    - ACCESS_CONFIG_PATH=${ACCESS_CONFIG_PATH:-/app/config/access_config.json}
+    - ROLE_CONFIG_PATH=${ROLE_CONFIG_PATH:-/app/config/roles.json}
+    - ROLE_INDEX_CONFIG_PATH=${ROLE_INDEX_CONFIG_PATH:-/app/config/role_indices.json}
+    - LOCAL_SINGLE_USER_MODE=${LOCAL_SINGLE_USER_MODE:-true}
+    - PDFSEARCH_ALLOWED_ORIGINS=${PDFSEARCH_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1,http://localhost:5050,http://127.0.0.1:5050}
+    - NODERED_COORDINATOR_TOKEN_FILE=${NODERED_COORDINATOR_TOKEN_FILE:-}
+    - STORAGE_CONFIG_PATH=${STORAGE_CONFIG_PATH:-/app/index_folder/storage_config.json}
+    - BACKUP_TARGET_FOLDER=${BACKUP_TARGET_FOLDER:-/app/backups}
+    - BACKUP_ENABLED=${BACKUP_ENABLED:-false}
+    - BACKUP_INTERVAL_HOURS=${BACKUP_INTERVAL_HOURS:-24}
+    - BACKUP_RETENTION_COUNT=${BACKUP_RETENTION_COUNT:-7}
+    - ADMIN_TAILSCALE_USERS=${ADMIN_TAILSCALE_USERS:-}
+    - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
+    - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM:-}
+    - ALERT_EMAIL_PASSWORD=${ALERT_EMAIL_PASSWORD:-}
+    - ALERT_EMAIL_SMTP=${ALERT_EMAIL_SMTP:-smtp.gmail.com}
+    - ALERT_EMAIL_PORT=${ALERT_EMAIL_PORT:-587}
+    - CLAMAV_HOST=${CLAMAV_HOST:-clamav}
+    - CLAMAV_PORT=${CLAMAV_PORT:-3310}
+    - CLAMAV_WAIT_SECONDS=${CLAMAV_WAIT_SECONDS:-300}
+    - CLAMAV_RETRY_SECONDS=${CLAMAV_RETRY_SECONDS:-2}
+    - CLOUD_SYNC_INTERVAL_SECONDS=${CLOUD_SYNC_INTERVAL_SECONDS:-300}
+    - CLOUD_SYNC_SCHEDULER_POLL_SECONDS=${CLOUD_SYNC_SCHEDULER_POLL_SECONDS:-30}
+    - MANAGED_CLOUD_FOLDER=${MANAGED_CLOUD_FOLDER:-/app/cloud/managed}
+    - CLOUD_CONNECTIONS_PATH=${CLOUD_CONNECTIONS_PATH:-/app/index_folder/cloud_connections.json}
+    - CLOUD_PROVIDER_CONFIG_PATH=${CLOUD_PROVIDER_CONFIG_PATH:-/app/index_folder/cloud_provider_config.json}
+    - MICROSOFT_GRAPH_CLIENT_ID=${MICROSOFT_GRAPH_CLIENT_ID:-}
+    - MICROSOFT_GRAPH_TENANT=${MICROSOFT_GRAPH_TENANT:-common}
+    - MICROSOFT_GRAPH_SCOPES=${MICROSOFT_GRAPH_SCOPES:-offline_access User.Read Files.ReadWrite}
+    - MICROSOFT_GRAPH_REQUEST_TIMEOUT_SECONDS=${MICROSOFT_GRAPH_REQUEST_TIMEOUT_SECONDS:-60}
+    - GOOGLE_DRIVE_CLIENT_ID=${GOOGLE_DRIVE_CLIENT_ID:-}
+    - GOOGLE_DRIVE_CLIENT_SECRET=${GOOGLE_DRIVE_CLIENT_SECRET:-}
+    - GOOGLE_DRIVE_REDIRECT_URI=${GOOGLE_DRIVE_REDIRECT_URI:-}
+    - GOOGLE_DRIVE_SCOPES=${GOOGLE_DRIVE_SCOPES:-https://www.googleapis.com/auth/drive
+      https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile}
+    - GOOGLE_DRIVE_REQUEST_TIMEOUT_SECONDS=${GOOGLE_DRIVE_REQUEST_TIMEOUT_SECONDS:-60}
+    - DROPBOX_APP_KEY=${DROPBOX_APP_KEY:-}
+    - DROPBOX_APP_SECRET=${DROPBOX_APP_SECRET:-}
+    - DROPBOX_REDIRECT_URI=${DROPBOX_REDIRECT_URI:-}
+    - DROPBOX_SCOPES=${DROPBOX_SCOPES:-account_info.read files.metadata.read files.content.read
+      files.content.write}
+    - DROPBOX_REQUEST_TIMEOUT_SECONDS=${DROPBOX_REQUEST_TIMEOUT_SECONDS:-60}
+    - NODE_RED_COORDINATOR_URL=${NODE_RED_COORDINATOR_URL:-}
+    - NODERED_COORDINATOR_URL=${NODERED_COORDINATOR_URL:-}
+    - NODERED_COORDINATOR_STATUS_ENDPOINT=${NODERED_COORDINATOR_STATUS_ENDPOINT:-}
+    - NODERED_COORDINATOR_ACTION_ENDPOINT=${NODERED_COORDINATOR_ACTION_ENDPOINT:-}
+    - NODERED_COORDINATOR_ACTION_ENDPOINTS=${NODERED_COORDINATOR_ACTION_ENDPOINTS:-}
+    - NODERED_COORDINATOR_JOB_API_ENABLED=${NODERED_COORDINATOR_JOB_API_ENABLED:-true}
+    - NODERED_COORDINATOR_JOB_TYPE=${NODERED_COORDINATOR_JOB_TYPE:-pdfsearchengine_index}
+    - NODERED_COORDINATOR_JOB_LABEL=${NODERED_COORDINATOR_JOB_LABEL:-PDFSearchEngine
+      Index}
+    - NODERED_COORDINATOR_DEFER=${NODERED_COORDINATOR_DEFER:-true}
+    - NODERED_COORDINATOR_AVOID_JELLYFIN_PLAYBACK=${NODERED_COORDINATOR_AVOID_JELLYFIN_PLAYBACK:-true}
+    - NODERED_COORDINATOR_HEARTBEAT_SECONDS=${NODERED_COORDINATOR_HEARTBEAT_SECONDS:-30}
+    - NODERED_COORDINATOR_HEARTBEAT_TIMEOUT_SECONDS=${NODERED_COORDINATOR_HEARTBEAT_TIMEOUT_SECONDS:-300}
+    - NODERED_COORDINATOR_DURATION_SECONDS=${NODERED_COORDINATOR_DURATION_SECONDS:-3600}
+    - NODERED_COORDINATOR_TIMEOUT_SECONDS=${NODERED_COORDINATOR_TIMEOUT_SECONDS:-2}
+    - NODERED_COORDINATOR_POLL_SECONDS=${NODERED_COORDINATOR_POLL_SECONDS:-15}
+    - NODERED_COORDINATOR_WRAPUP_SECONDS=${NODERED_COORDINATOR_WRAPUP_SECONDS:-45}
+    - NODERED_COORDINATOR_DEFAULT_SECONDS_PER_DOCUMENT=${NODERED_COORDINATOR_DEFAULT_SECONDS_PER_DOCUMENT:-20}
+    - NODERED_COORDINATOR_FAIL_OPEN=${NODERED_COORDINATOR_FAIL_OPEN:-true}
+    - JOB_COORDINATOR_STATE_PATH=${JOB_COORDINATOR_STATE_PATH:-/app/index_folder/job_coordinator_state.json}
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:5050/health
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      clamav:
+        condition: service_healthy
+    restart: always
+  frontend:
+    image: docker.io/library/nginx@sha256:2d829ce6bc998fecd1cd72204c358c0c0614bab5edd9471dfcf8b92a49f4d323
+    ports:
+    - 127.0.0.1:${FRONTEND_PORT:-8080}:80
+    volumes:
+    - ./frontend:/usr/share/nginx/html
+    - ./frontend/inject-ports-and-start.sh:/docker-entrypoint.d/inject-ports-and-start.sh
+    environment:
+    - BACKEND_PORT=${BACKEND_PORT:-5050}
+    entrypoint:
+    - /bin/sh
+    - /docker-entrypoint.d/inject-ports-and-start.sh
+    restart: always
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
+    - NET_BIND_SERVICE
+    - KILL
+  mail-processor:
+    build: ./email_processor
+    ports:
+    - 127.0.0.1:${MAIL_PROCESSOR_PORT:-5000}:5000
+    volumes:
+    - ${LOG_STORAGE_HOST_PATH:-./data/logs}:/app/logs
+    - ${EMAIL_CONFIG_HOST_PATH:-./data/email_configs}:/app/email_configs
+    - ${MAIL_STATE_HOST_PATH:-./data/mail_state}:/app/email_processor/processor_state
+    environment:
+    - BACKEND_API=http://backend:5050
+    - MAIL_TOKEN=${MAIL_TOKEN:-local-mail-token}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+  test-runner:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: tests/Dockerfile.test
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://backend:5050
+      TEST_BYPASS_TOKEN: ${TEST_BYPASS_TOKEN:-}
+      INTEGRATION_REQUEST_TIMEOUT: ${INTEGRATION_REQUEST_TIMEOUT:-10}
+      INTEGRATION_TASK_TIMEOUT: ${INTEGRATION_TASK_TIMEOUT:-90}
+      INTEGRATION_SEARCH_TIMEOUT: ${INTEGRATION_SEARCH_TIMEOUT:-30}
+      INTEGRATION_SKIP_COORDINATOR_BLOCKED: ${INTEGRATION_SKIP_COORDINATOR_BLOCKED:-true}
+    command:
+    - pytest
+    - -v
+    - /app/tests
+  clamav:
+    image: clamav/clamav-debian:stable
+    volumes:
+    - ${TMP_STORAGE_HOST_PATH:-./data/tmp}:/app/tmp
+    - clamav-db:/var/lib/clamav
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - clamdcheck.sh
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+    restart: unless-stopped
+volumes:
+  clamav-db: null
