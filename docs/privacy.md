@@ -4,7 +4,7 @@ Application source belongs in this upstream repository. Documents, credentials, 
 
 ## Set up a development checkout
 
-Start from this repository, not an old private clone:
+Start a separate source-only development checkout from this repository, not an old private clone. Leave the customized production checkout and its private files in place:
 
 ```sh
 git clone git@github.com:KTV02/PdfSearchEngine.git
@@ -64,7 +64,7 @@ Each supported context lists exact source inputs. When adding a backend Python m
 
 Build/distribute images from a clean source-only checkout. Build arguments, Docker image environment settings, and Compose files copied into images must not contain real credentials. An ignored local override can change build contexts, so review its resolved configuration privately. Root-context protection cannot secure an arbitrary unrelated directory selected in an override.
 
-Building or running the production stack is a separate operation from pushing source. Existing locally customized settings remain local when pulling shared source changes; do not replace them with examples. Review configuration/mount compatibility and plan deployment separately.
+A push does not rebuild or restart the production stack. However, files bind-mounted into running containers, including frontend assets, can affect the live application as soon as they are edited or pulled in the production checkout. Use the separate development checkout for feature work and isolated tests. Existing locally customized settings remain local when pulling shared source changes; do not replace them with examples. Review configuration/mount compatibility and plan deployment separately.
 
 ## Before making the repository or an image public
 
