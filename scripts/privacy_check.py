@@ -144,7 +144,10 @@ def candidates(text):
         except (ValueError, SyntaxError):
             pass
     for match in DOC_LITERAL.finditer(text):
-        yield match.group().strip()
+        # Include tails so prose before an unquoted document name cannot hide it.
+        words = match.group().strip().split()
+        for start in range(len(words)):
+            yield ' '.join(words[start:])
 
 
 def load_profile():

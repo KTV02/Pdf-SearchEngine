@@ -173,6 +173,18 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn(message.encode(), result.stdout + result.stderr)
         self.assertIn(b'Commit message', result.stderr)
 
+    def test_known_document_name_in_unquoted_prose_is_blocked(self):
+        value = 'Synthetic sensitive' + ' document' + '.pdf'
+        result = subprocess.run([sys.executable, str(self.repo / 'scripts/privacy_profile.py')],
+                                input=json.dumps([value]).encode(), capture_output=True)
+        self.assertEqual(result.returncode, 0)
+        self.write('docs/feature.md', 'An example refers to ' + value + '.\n')
+        self.git('add', 'docs/feature.md')
+        result = self.check('--staged')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'known-private-local-value', result.stderr)
+        self.assertNotIn(value.encode(), result.stdout + result.stderr)
+
     def test_profile_refresh_does_not_approve_a_newly_committed_private_value(self):
         value = 'synthetic-new-value' + '-with-no-provider-pattern'
         self.write('app/.env', 'MAIL_TOKEN=' + value + '\n')
