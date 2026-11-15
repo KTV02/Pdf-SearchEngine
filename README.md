@@ -79,3 +79,7 @@ TEST_BYPASS_TOKEN=choose-a-test-only-token docker compose --profile test run --r
 Integration tests create and delete test data. Do not run them against a production installation. The test service is in the `test` profile, so ordinary `docker compose up` does not run it. For unit tests only, install the test dependencies and run `pytest -m "not integration" app/tests` with `app/backend` on `PYTHONPATH`.
 
 There is no active automatic deployment workflow. Updating Git does not update a running installation: review local settings, pull the desired version, and deliberately rebuild with `docker compose up -d --build`. See [migration guidance](docs/migration.md) when upgrading a previously customized installation.
+
+## License
+
+[MIT License](LICENSE).

@@ -26,3 +26,8 @@ app/frontend/settings.js
 __pycache__/
 .pytest_cache/
 .DS_Store
+
+# Legacy local material and archives
+/other/
+/app/archive.tar.gz
+/app/start.sh
