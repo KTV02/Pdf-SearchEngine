@@ -115,7 +115,7 @@ class PublicationTests(unittest.TestCase):
         self.assertIn(b'noreply', result.stderr)
 
     def test_imported_orphan_history_is_blocked(self):
-        committed = self.git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Add reviewed publication controls')
+        committed = self.git('-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
         self.assertEqual(committed.returncode, 0)
         tree = self.git('mktree', input=b'').stdout.strip()
         commit = self.git('commit-tree', tree.decode(), input=b'Synthetic independent root\n').stdout.strip()
@@ -125,7 +125,7 @@ class PublicationTests(unittest.TestCase):
         self.assertIn(b'root history', result.stderr)
 
     def test_private_annotated_tag_identity_is_blocked(self):
-        result = self.git('commit', '-qm', 'Add reviewed publication controls')
+        result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         email = 'private-owner' + '@' + 'mailhost' + '.com'
         result = self.git('-c', 'user.email=' + email, 'tag', '-a', 'v0.0.0-test', '-m', 'Synthetic release')
@@ -155,12 +155,12 @@ class PublicationTests(unittest.TestCase):
         path = 'app/data/synthetic-private-name.json'
         self.write(path, '{}')
         self.git('add', '-f', path)
-        result = self.git('commit', '-qm', 'Synthetic attempted private addition')
+        result = self.git('commit', '--allow-empty', '-qm', 'Synthetic attempted private addition')
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(b'synthetic-private-name', result.stdout + result.stderr)
 
     def test_clean_commit_and_real_push_hook_allow_feature_development(self):
-        result = self.git('commit', '-qm', 'Add reviewed publication controls')
+        result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         result = subprocess.run(['sh', str(self.repo / '.githooks/pre-push')],
                                 cwd=self.repo, capture_output=True)
@@ -168,7 +168,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_real_commit_message_hook_blocks_private_prose(self):
         message = 'Contact ' + 'private-owner' + '@' + 'mailhost' + '.com'
-        result = self.git('commit', '-qm', message)
+        result = self.git('commit', '--allow-empty', '-qm', message)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(message.encode(), result.stdout + result.stderr)
         self.assertIn(b'Commit message', result.stderr)
@@ -191,7 +191,7 @@ class PublicationTests(unittest.TestCase):
         with (self.repo / 'app/frontend/config.js').open('a') as f:
             f.write('\n// "' + value + '"\n')
         self.git('add', 'app/frontend/config.js')
-        committed = self.git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Synthetic accidental addition')
+        committed = self.git('-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'Synthetic accidental addition')
         self.assertEqual(committed.returncode, 0)
         with mock.patch.object(guard, 'ROOT', self.repo), mock.patch('shutil.which', return_value=None):
             privacy_profile.refresh_local()
