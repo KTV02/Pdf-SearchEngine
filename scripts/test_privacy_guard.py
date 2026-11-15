@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import privacy_profile
 
 import privacy_check as guard
 
@@ -170,6 +172,21 @@ class PublicationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(message.encode(), result.stdout + result.stderr)
         self.assertIn(b'Commit message', result.stderr)
+
+    def test_profile_refresh_does_not_approve_a_newly_committed_private_value(self):
+        value = 'synthetic-new-value' + '-with-no-provider-pattern'
+        self.write('app/.env', 'MAIL_TOKEN=' + value + '\n')
+        with (self.repo / 'app/frontend/config.js').open('a') as f:
+            f.write('\n// "' + value + '"\n')
+        self.git('add', 'app/frontend/config.js')
+        committed = self.git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Synthetic accidental addition')
+        self.assertEqual(committed.returncode, 0)
+        with mock.patch.object(guard, 'ROOT', self.repo), mock.patch('shutil.which', return_value=None):
+            privacy_profile.refresh_local()
+        result = self.check('--history')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'known-private-local-value', result.stderr)
+        self.assertNotIn(value.encode(), result.stdout + result.stderr)
 
     def test_commit_message_hook_blocks_private_content(self):
         message = 'contact ' + 'private-owner' + '@' + 'mailhost' + '.com'

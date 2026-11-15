@@ -53,5 +53,6 @@
       "fingerprint": "5b69f20f75ab4b52455261fa0b887b1974e7a35581cb435b5b888c18de8a6442",
       "reason": "Previously audited synthetic authorization fixture; current fixture uses a documentation address."
     }
-  ]
+  ],
+  "reviewed_placeholder_commit": "ef3c7b8c911976de4873ca759f24357496e31fcc"
 }

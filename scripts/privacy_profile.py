@@ -122,10 +122,14 @@ def refresh_local():
                     collect(filename)
     # Already-reviewed public placeholders must not become private deny entries.
     public = []
-    for row in git('rev-list', '--objects', '--all').stdout.decode().splitlines():
-        obj = row.split(' ', 1)[0]
-        if git('cat-file', '-t', obj).stdout.strip() == b'blob':
-            public.append(git('cat-file', 'blob', obj).stdout.decode(errors='replace'))
+    policy = json.loads(git('show', 'HEAD:.privacy-policy.json').stdout)
+    baseline = policy['reviewed_placeholder_commit']
+    # A fixed audited snapshot prevents a later accidental commit from teaching
+    # the local guard that a newly exposed private value is a safe placeholder.
+    objects = {row.split(b'\t', 1)[0].split()[2].decode() for row in
+               git('ls-tree', '-rz', baseline).stdout.split(b'\0') if row}
+    for obj in objects:
+        public.append(git('cat-file', 'blob', obj).stdout.decode(errors='replace'))
     public_text = normalize('\n'.join(public))
     return remember(v for v in values if normalize(v) not in public_text)
 
