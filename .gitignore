@@ -5,6 +5,9 @@
 app/.env
 app/.env.*
 !app/.env.example
+/compose.override.yaml
+/compose.override.yml
+/docker-compose.override.yml
 app/docker-compose.override.yml
 app/compose.override.yml
 app/data/

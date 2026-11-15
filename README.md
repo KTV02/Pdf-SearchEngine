@@ -41,7 +41,7 @@ Common options:
 
 Relative storage paths are resolved relative to `app/`, even when Compose is invoked at the repository root. The backend automatically treats a missing access file as an empty configuration; `app/data/config/access_config.json` and `roles.json` are created when settings are saved. `role_indices.json` in the same directory optionally maps legacy IP role names to lists of index names. These files belong to the installation, not the source repository.
 
-For settings that cannot be expressed as environment variables, create an ignored `app/docker-compose.override.yml`. Compose automatically combines it with the base configuration. For example, a coordinator token can be mounted read-only:
+For settings that cannot be expressed as environment variables, create an ignored `compose.override.yaml` in the repository root. Compose automatically combines it with the base configuration when invoked from the repository root. For example, a coordinator token can be mounted read-only:
 
 ```yaml
 services:
@@ -68,7 +68,7 @@ Set `BACKUP_ENABLED=true`, `BACKUP_INTERVAL_HOURS`, `BACKUP_RETENTION_COUNT`, an
 
 ## Development and tests
 
-The Flask backend is in `app/backend`, the static frontend in `app/frontend`, and email processing in `app/email_processor`. The services build from Dockerfiles with pinned runtime images and dependency lock files. `app/docker-compose.yml` is the shared service definition; root `compose.yaml` includes it. `app/docker-compose.override.yml`, `.env` files, and `app/data/` are local-only. Change application code in Git, and place machine-specific settings in those local files.
+The Flask backend is in `app/backend`, the static frontend in `app/frontend`, and email processing in `app/email_processor`. The services build from Dockerfiles with pinned runtime images and dependency lock files. `app/docker-compose.yml` is the shared service definition; root `compose.yaml` includes it. `compose.override.yaml`, `.env` files, and `app/data/` are local-only. Change application code in Git, and place machine-specific settings in those local files.
 
 To run the test suite against a disposable stack, set a unique `TEST_BYPASS_TOKEN` in an isolated environment and run:
 
