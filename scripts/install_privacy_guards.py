@@ -24,6 +24,29 @@ CHECKSUMS = {
 }
 
 
+
+def configure_hooks():
+    hooks = git_path('privacy-hooks').resolve()
+    old = git('config', '--get', 'core.hooksPath', check=False).stdout.decode().strip()
+    if old and old not in {'.githooks', str(hooks)}:
+        raise RuntimeError('Existing custom hooks were preserved; integrate the privacy hooks manually.')
+    default = git_path('hooks')
+    if not old and default.exists() and any(p.is_file() and not p.name.endswith('.sample')
+            and os.access(p, os.X_OK) for p in default.iterdir()):
+        raise RuntimeError('Existing active hooks were preserved; integrate the privacy hooks manually.')
+    hooks.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name in ['pre-commit', 'commit-msg', 'pre-push']:
+        source = ROOT / '.githooks' / name
+        target = hooks / name
+        fd = os.open(target.with_suffix('.tmp'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(source.read_bytes())
+        os.replace(target.with_suffix('.tmp'), target)
+        os.chmod(target, 0o700)
+    # Git-local absolute entry points survive checkouts without versioned hooks.
+    git('config', '--local', 'core.hooksPath', str(hooks))
+
+
 def install(scanner_only=False):
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -58,14 +81,7 @@ def install(scanner_only=False):
         if tmp.exists():
             tmp.unlink()
     if not scanner_only:
-        old = git('config', '--get', 'core.hooksPath', check=False).stdout.decode().strip()
-        if old and old != '.githooks':
-            raise RuntimeError('Existing custom hooks were preserved; integrate the privacy hooks manually.')
-        default = git_path('hooks')
-        if not old and default.exists() and any(p.is_file() and not p.name.endswith('.sample')
-                and os.access(p, os.X_OK) for p in default.iterdir()):
-            raise RuntimeError('Existing active hooks were preserved; integrate the privacy hooks manually.')
-        git('config', '--local', 'core.hooksPath', '.githooks')
+        configure_hooks()
     print('Pinned scanner installed' + ('.' if scanner_only else '; repository privacy hooks enabled.'))
 
 

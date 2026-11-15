@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 import privacy_profile
+import install_privacy_guards
 
 import privacy_check as guard
 
@@ -184,6 +185,22 @@ class PublicationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'known-private-local-value', result.stderr)
         self.assertNotIn(value.encode(), result.stdout + result.stderr)
+
+    def test_installed_hooks_survive_a_branch_without_guard_files(self):
+        with mock.patch.object(guard, 'ROOT', self.repo), mock.patch.object(install_privacy_guards, 'ROOT', self.repo):
+            install_privacy_guards.configure_hooks()
+        installed = Path(self.git('config', '--get', 'core.hooksPath').stdout.decode().strip())
+        self.assertTrue(installed.is_absolute())
+        result = self.git('checkout', '-f', 'ef3c7b8c911976de4873ca759f24357496e31fcc')
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse((self.repo / 'scripts/privacy_check.py').exists())
+        remote = Path(self.temp.name) / 'destination.git'
+        subprocess.run(['git', 'init', '--bare', '--quiet', str(remote)], capture_output=True, check=True)
+        result = self.git('push', str(remote), 'HEAD:refs/heads/main')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Privacy guard is unavailable', result.stderr)
+        ref = subprocess.run(['git', '-C', str(remote), 'rev-parse', '--verify', 'refs/heads/main'], capture_output=True)
+        self.assertNotEqual(ref.returncode, 0)
 
     def test_profile_refresh_does_not_approve_a_newly_committed_private_value(self):
         value = 'synthetic-new-value' + '-with-no-provider-pattern'

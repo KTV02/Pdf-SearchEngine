@@ -12,7 +12,7 @@ cd PdfSearchEngine
 python3 scripts/install_privacy_guards.py
 ```
 
-The installer verifies a pinned Gitleaks release checksum and enables this checkout's commit, commit-message, and push hooks. It does not change global Git settings, deploy services, or replace existing custom hooks. New clones need this setup; hooks are not automatically enabled by Git.
+The installer verifies a pinned Gitleaks release checksum and enables this checkout's commit, commit-message, and push hooks. Their local entry points live inside Git's internal directory, so switching to a branch without the guard files blocks commits/pushes instead of silently disabling the checks. It does not change global Git settings, deploy services, or replace existing custom hooks. New clones need this setup; hooks are not automatically enabled by Git.
 
 Use a reviewed public author alias listed in `.privacy-policy.json` and your own GitHub noreply email in this checkout's local Git configuration. The guard rejects unreviewed names and personal email addresses without printing them. Review policy updates for additional contributors rather than disabling this check.
 
