@@ -7,8 +7,8 @@ Application source belongs in this upstream repository. Documents, credentials, 
 Start a separate source-only development checkout from this repository, not an old private clone. Leave the customized production checkout and its private files in place:
 
 ```sh
-git clone git@github.com:KTV02/PdfSearchEngine.git
-cd PdfSearchEngine
+git clone git@github.com:KTV02/Pdf-SearchEngine.git
+cd Pdf-SearchEngine
 python3 scripts/install_privacy_guards.py
 ```
 
