@@ -56,5 +56,8 @@
       "reason": "Previously audited synthetic authorization fixture; current fixture uses a documentation address."
     }
   ],
-  "reviewed_placeholder_commit": "ef3c7b8c911976de4873ca759f24357496e31fcc"
+  "reviewed_placeholder_commit": "ef3c7b8c911976de4873ca759f24357496e31fcc",
+  "reviewed_public_values": [
+    "Lennart Kremp"
+  ]
 }

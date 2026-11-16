@@ -345,6 +345,19 @@ class PublicationTests(unittest.TestCase):
                 self.write('app/backend/task_queue.py', original)
                 self.git('add', 'app/backend/task_queue.py')
 
+    def test_reviewed_public_value_is_allowed_but_other_known_values_still_block(self):
+        other = 'synthetic-still-' + 'private-value'
+        self.seed_profile('Lennart Kremp', other)
+        self.write('docs/feature.md', 'Maintained by Lennart Kremp.\n')
+        self.git('add', 'docs/feature.md')
+        result = self.check('--staged')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.write('docs/feature.md', 'Maintained by Lennart Kremp, see ' + other + '.\n')
+        self.git('add', 'docs/feature.md')
+        result = self.check('--staged')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'known-private-local-value', result.stderr)
+
     def test_untracked_dockerfile_specific_ignore_blocks_checks(self):
         self.write('app/backend/Dockerfile.dockerignore', '!*\n')
         result = self.check('--staged')

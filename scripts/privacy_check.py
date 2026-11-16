@@ -225,6 +225,23 @@ def load_profile(required=False):
         raise Blocked('The local private-value profile is unreadable; repair it before publishing.')
 
 
+def reviewed_public_forms(policy):
+    """Values the owner deliberately published (e.g. the copyright holder) and their words."""
+    forms = set()
+    for value in policy.get('reviewed_public_values', []):
+        forms.update({normalize(value), canonical(value)})
+        forms.update(word for word in canonical(value).split() if len(word) >= 5)
+    return forms
+
+
+def without_public_values(profile, policy):
+    if not profile:
+        return profile
+    salt, hashes = profile
+    allowed = {hashlib.sha256((salt + form).encode()).hexdigest() for form in reviewed_public_forms(policy)}
+    return salt, hashes - allowed
+
+
 def content_problems(data, policy, blob='', profile=None):
     if len(data) > MAX_FILE:
         return [('oversized source file', 0)]
@@ -462,7 +479,7 @@ def main(argv=None, stdin=None):
     if config.returncode or config.stdout != (ROOT / '.gitleaks.toml').read_bytes():
         raise Blocked('Stage/commit scanner configuration changes before privacy checking.')
     allow_missing = git('config', '--bool', 'privacy.allowMissingProfile', check=False).stdout.strip() == b'true'
-    profile = load_profile(required=bool(args.hook) and not allow_missing)
+    profile = without_public_values(load_profile(required=bool(args.hook) and not allow_missing), policy)
     seen = set()
     if args.commit_message:
         data = args.commit_message.read_bytes()
