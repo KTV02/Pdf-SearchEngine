@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+# Synthetic unit-test value; real stacks generate a fresh random token per run.
+UNIT_TEST_BYPASS_TOKEN = "unit-test-bypass-token-0123456789abcdef"
+
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_DIR = APP_ROOT / "backend"
@@ -37,7 +40,8 @@ def backend_module(tmp_path, monkeypatch):
     monkeypatch.setenv("DISABLE_BACKUP_SCHEDULER", "true")
     monkeypatch.setenv("DISABLE_CLOUD_SYNC_SCHEDULER", "true")
     monkeypatch.delenv("BACKUP_ENABLED", raising=False)
-    monkeypatch.setenv("TEST_BYPASS_TOKEN", "test-token")
+    monkeypatch.setenv("PDFSEARCH_TEST_MODE", "true")
+    monkeypatch.setenv("TEST_BYPASS_TOKEN", UNIT_TEST_BYPASS_TOKEN)
     monkeypatch.setenv("MAIL_TOKEN", "mail-token")
     monkeypatch.setenv("ADMIN_TAILSCALE_USERS", "env-admin@example.com")
     monkeypatch.delenv("GOOGLE_DRIVE_CLIENT_ID", raising=False)
@@ -68,6 +72,7 @@ def backend_module(tmp_path, monkeypatch):
     sys.modules.pop("app", None)
     module = importlib.import_module("app")
     module.app.config.update(TESTING=True)
+    module.real_get_docker_gateway_ip = module.get_docker_gateway_ip
     monkeypatch.setattr(module, "get_docker_gateway_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(module, "send_alert_email", lambda *args, **kwargs: None)
     yield module

@@ -14,7 +14,6 @@ services:
     - ${EMAIL_CONFIG_HOST_PATH:-./data/email_configs}:/app/email_configs
     environment:
     - MAIL_TOKEN=${MAIL_TOKEN:-local-mail-token}
-    - TEST_BYPASS_TOKEN=${TEST_BYPASS_TOKEN:-}
     - PDF_FOLDER=${PDF_FOLDER:-/app/ocr/converted}
     - DELETED_FOLDER=${DELETED_FOLDER:-/app/ocr/deleted}
     - INDEX_FOLDER=${INDEX_FOLDER:-/app/index_folder}
@@ -137,25 +136,6 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
-  test-runner:
-    profiles: ["test"]
-    build:
-      context: .
-      dockerfile: tests/Dockerfile.test
-    depends_on:
-      backend:
-        condition: service_healthy
-    environment:
-      BASE_URL: http://backend:5050
-      TEST_BYPASS_TOKEN: ${TEST_BYPASS_TOKEN:-}
-      INTEGRATION_REQUEST_TIMEOUT: ${INTEGRATION_REQUEST_TIMEOUT:-10}
-      INTEGRATION_TASK_TIMEOUT: ${INTEGRATION_TASK_TIMEOUT:-90}
-      INTEGRATION_SEARCH_TIMEOUT: ${INTEGRATION_SEARCH_TIMEOUT:-30}
-      INTEGRATION_SKIP_COORDINATOR_BLOCKED: ${INTEGRATION_SKIP_COORDINATOR_BLOCKED:-true}
-    command:
-    - pytest
-    - -v
-    - /app/tests
   clamav:
     image: clamav/clamav-debian:stable
     volumes:

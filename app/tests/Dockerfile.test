@@ -2,12 +2,14 @@
 FROM python:3.10-slim
 
 WORKDIR /app
+ENV PYTHONPATH=/app/backend
 
 # Copy app code needed by unit tests plus the test suite.
 COPY ./backend ./backend
 COPY ./email_processor ./email_processor
 COPY ./tests ./tests
 COPY ./docker-compose.yml ./docker-compose.yml
+COPY ./compose.integration.yml ./compose.integration.yml
 COPY ./pytest.ini ./pytest.ini
 
 RUN pip install --upgrade pip

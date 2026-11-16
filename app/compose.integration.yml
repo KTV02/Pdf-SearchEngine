@@ -1,0 +1,77 @@
+# Isolated integration-test stack. It never mounts installation data, publishes no
+# ports, and runs on an internal network without outside access. Start it only via
+# scripts/run_integration_tests.sh, which generates fresh random tokens for each run
+# and removes all containers and volumes afterwards.
+name: pdfsearch-integration
+services:
+  backend:
+    build: ./backend
+    environment:
+      PDFSEARCH_TEST_MODE: "true"
+      TEST_BYPASS_TOKEN: ${INTEGRATION_BYPASS_TOKEN:?Run scripts/run_integration_tests.sh}
+      MAIL_TOKEN: ${INTEGRATION_MAIL_TOKEN:?Run scripts/run_integration_tests.sh}
+      LOCAL_SINGLE_USER_MODE: "false"
+      PDF_FOLDER: /app/ocr/converted
+      DELETED_FOLDER: /app/ocr/deleted
+      INDEX_FOLDER: /app/index_folder
+      TMP_FOLDER: /app/tmp
+      LOG_FOLDER: /app/logs
+      EMAIL_CONFIGS: /app/email_configs
+      ACCESS_CONFIG_PATH: /app/config/access_config.json
+      ROLE_CONFIG_PATH: /app/config/roles.json
+      ROLE_INDEX_CONFIG_PATH: /app/config/role_indices.json
+      STORAGE_CONFIG_PATH: /app/index_folder/storage_config.json
+      CLOUD_CONNECTIONS_PATH: /app/index_folder/cloud_connections.json
+      CLOUD_PROVIDER_CONFIG_PATH: /app/index_folder/cloud_provider_config.json
+      MANAGED_CLOUD_FOLDER: /app/cloud/managed
+      BACKUP_TARGET_FOLDER: /app/backups
+      BACKUP_ENABLED: "false"
+      DISABLE_BACKUP_SCHEDULER: "true"
+      DISABLE_CLOUD_SYNC_SCHEDULER: "true"
+      NODERED_COORDINATOR_URL: ""
+      NODERED_COORDINATOR_JOB_API_ENABLED: "false"
+      JOB_COORDINATOR_STATE_PATH: /app/index_folder/job_coordinator_state.json
+    volumes:
+      - itest-ocr:/app/ocr
+      - itest-index:/app/index_folder
+      - itest-tmp:/app/tmp
+      - itest-logs:/app/logs
+      - itest-backups:/app/backups
+      - itest-cloud:/app/cloud
+      - itest-config:/app/config
+      - itest-email:/app/email_configs
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:5050/health]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [itest]
+  test-runner:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile.test
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://backend:5050
+      TEST_BYPASS_TOKEN: ${INTEGRATION_BYPASS_TOKEN:?Run scripts/run_integration_tests.sh}
+      INTEGRATION_REQUEST_TIMEOUT: ${INTEGRATION_REQUEST_TIMEOUT:-10}
+      INTEGRATION_TASK_TIMEOUT: ${INTEGRATION_TASK_TIMEOUT:-90}
+      INTEGRATION_SEARCH_TIMEOUT: ${INTEGRATION_SEARCH_TIMEOUT:-30}
+      INTEGRATION_SKIP_COORDINATOR_BLOCKED: ${INTEGRATION_SKIP_COORDINATOR_BLOCKED:-true}
+    command: [pytest, -v, /app/tests]
+    networks: [itest]
+networks:
+  itest:
+    internal: true
+volumes:
+  itest-ocr:
+  itest-index:
+  itest-tmp:
+  itest-logs:
+  itest-backups:
+  itest-cloud:
+  itest-config:
+  itest-email:

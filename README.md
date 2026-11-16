@@ -37,7 +37,6 @@ Common options:
 | `PDFSEARCH_ALLOWED_ORIGINS` | Localhost and 127.0.0.1 on ports 8080, 80 and 5050 | Comma-separated exact frontend origins; update when changing the frontend port or using a reverse proxy. |
 | `ADMIN_TAILSCALE_USERS` | empty | Comma-separated Tailscale login emails for initial administrators. |
 | `MAIL_TOKEN` | `local-mail-token` | Shared internal mail-ingestion token. Set a private random value for an installation; both services receive the same value. |
-| `TEST_BYPASS_TOKEN` | empty | Optional test-only admin bypass. Leave empty outside an isolated test environment. |
 
 Relative storage paths are resolved relative to `app/`, even when Compose is invoked at the repository root. The backend automatically treats a missing access file as an empty configuration; `app/data/config/access_config.json` and `roles.json` are created when settings are saved. `role_indices.json` in the same directory optionally maps legacy IP role names to lists of index names. These files belong to the installation, not the source repository.
 
@@ -80,13 +79,13 @@ Keep installation-specific changes in ignored environment/Compose overrides and 
 
 The Flask backend is in `app/backend`, the static frontend in `app/frontend`, and email processing in `app/email_processor`. The services build from Dockerfiles with pinned runtime images and dependency lock files. `app/docker-compose.yml` is the shared service definition; root `compose.yaml` includes it. `compose.override.yaml`, `.env` files, and `app/data/` are local-only. Change application code in Git, and place machine-specific settings in those local files.
 
-To run the test suite against a disposable stack, set a unique `TEST_BYPASS_TOKEN` in an isolated environment and run:
+To run the full test suite, including integration tests, against a disposable stack:
 
 ```sh
-TEST_BYPASS_TOKEN=choose-a-test-only-token docker compose --profile test run --rm test-runner
+scripts/run_integration_tests.sh
 ```
 
-Integration tests create and delete test data. Do not run them against a production installation. The test service is in the `test` profile, so ordinary `docker compose up` does not run it. For unit tests only, install the test dependencies and run `pytest -m "not integration" app/tests` with `app/backend` on `PYTHONPATH`.
+The script starts the separate `pdfsearch-integration` Compose project from `app/compose.integration.yml`. It uses its own throwaway volumes and an internal network without published ports, generates fresh random tokens for the run, and removes its containers and volumes afterwards. It never mounts installation data. The installation stack in `app/docker-compose.yml` has no test bypass: the backend honors the integration-test bypass only when `PDFSEARCH_TEST_MODE=true` and a token of at least 32 characters are both set, which only the isolated stack does. For unit tests only, install the test dependencies and run `pytest -m "not integration" app/tests` with `app/backend` on `PYTHONPATH`.
 
 There is no active automatic deployment workflow. A Git push does not rebuild or restart services. Files bind-mounted into containers, including frontend assets, can take effect as soon as they change; develop and test features in a separate source-only checkout. For a planned update, review local settings, pull the desired version, and deliberately rebuild with `docker compose up -d --build`. See [migration guidance](docs/migration.md) when upgrading a previously customized installation.
 

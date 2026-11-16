@@ -13,6 +13,7 @@ import os
 import tempfile
 from werkzeug.utils import secure_filename
 import hashlib
+import hmac
 import json
 import shutil
 import zipfile
@@ -3624,9 +3625,40 @@ def find_document_metadata_by_path(pdf_path, accessible_indices=None):
     return None, None
 
 
+TEST_BYPASS_MIN_TOKEN_LENGTH = 32
+
+
+def test_bypass_enabled():
+    """The integration-test bypass exists only in an explicitly isolated test stack."""
+    token = os.environ.get("TEST_BYPASS_TOKEN") or ""
+    test_mode = os.environ.get("PDFSEARCH_TEST_MODE", "").strip().lower() == "true"
+    return test_mode and len(token) >= TEST_BYPASS_MIN_TOKEN_LENGTH
+
+
 def is_test_bypass_request():
-    token = os.environ.get("TEST_BYPASS_TOKEN")
-    return bool(token) and request.headers.get("X-Test-Bypass") == token
+    if not test_bypass_enabled():
+        return False
+    supplied = request.headers.get("X-Test-Bypass") or ""
+    expected = os.environ.get("TEST_BYPASS_TOKEN") or ""
+    return bool(supplied) and hmac.compare_digest(supplied.encode(), expected.encode())
+
+
+def mail_token_matches(supplied):
+    expected = MAIL_TOKEN or ""
+    return bool(expected) and bool(supplied) and hmac.compare_digest(
+        supplied.encode(), expected.encode())
+
+
+def warn_about_insecure_test_settings():
+    if os.environ.get("TEST_BYPASS_TOKEN") and not test_bypass_enabled():
+        logger.warning("TEST_BYPASS_TOKEN is set but ignored: the bypass requires PDFSEARCH_TEST_MODE=true "
+                       "and a token of at least %d characters in an isolated test stack.",
+                       TEST_BYPASS_MIN_TOKEN_LENGTH)
+    elif test_bypass_enabled():
+        logger.warning("PDFSEARCH_TEST_MODE is enabled: authorization bypass is active for integration tests. "
+                       "Never enable it for a real installation.")
+    if MAIL_TOKEN in {"default_mail_token", "local-mail-token"}:
+        logger.warning("MAIL_TOKEN uses a public default; set a private random value in app/.env.")
 
 
 def normalize_login(login):
@@ -3974,7 +4006,7 @@ def block_internal_requests_except_add_document():
     if is_internal and not is_host and not test_bypass:
         if request.path == "/add-document":
             token = request.headers.get("X-Mail-Token")
-            if token != MAIL_TOKEN:
+            if not mail_token_matches(token):
                 alert_message = f"🚨 Internal container ({remote_ip}) used wrong token to access : {request.path}"
                 logger.error(alert_message)
                 send_alert_email("🚨 SECURITY ALERT: Forbidden Access Attempt", alert_message)
@@ -3996,8 +4028,10 @@ def get_docker_gateway_ip():
         docker_gateway_ip_cache = gateway_ip
         return gateway_ip
     except Exception as e:
+        # Without a default route (for example on an internal-only network) there is no
+        # Docker host gateway, so no request can be trusted as coming from the host.
         logger.warning("Failed to detect Docker gateway IP: %s", e)
-        raise
+        return None
 
 
 def update_task_status(task_id, status, message=None, result=None, index_name=None, coordinator=None):
@@ -9377,6 +9411,9 @@ if get_backup_config().get("enabled") and not parse_bool(os.environ.get("DISABLE
 
 if not parse_bool(os.environ.get("DISABLE_CLOUD_SYNC_SCHEDULER")):
     ensure_cloud_sync_scheduler_running()
+
+
+warn_about_insecure_test_settings()
 
 
 if __name__ == "__main__":

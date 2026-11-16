@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-BYPASS_HEADERS = {"X-Test-Bypass": "test-token"}
+BYPASS_HEADERS = {"X-Test-Bypass": "unit-test-bypass-token-0123456789abcdef"}
 
 
 def write_blank_pdf(path):
@@ -2170,3 +2170,40 @@ def test_empty_roles_and_private_legacy_mappings(backend_module, tmp_path, monke
     assert backend_module.load_roles() == {'198.51.100.1': 'reader'}
     mappings_path.write_text('{"reader": ["documents"]}')
     assert backend_module.get_role_to_indices() == {'reader': ['documents']}
+
+
+def test_test_bypass_requires_explicit_test_mode(backend_module, monkeypatch):
+    monkeypatch.delenv("PDFSEARCH_TEST_MODE", raising=False)
+    with backend_module.app.test_request_context(headers=BYPASS_HEADERS):
+        assert backend_module.is_test_bypass_request() is False
+
+
+def test_test_bypass_rejects_short_tokens_even_in_test_mode(backend_module, monkeypatch):
+    monkeypatch.setenv("PDFSEARCH_TEST_MODE", "true")
+    monkeypatch.setenv("TEST_BYPASS_TOKEN", "short-token")
+    with backend_module.app.test_request_context(headers={"X-Test-Bypass": "short-token"}):
+        assert backend_module.is_test_bypass_request() is False
+
+
+def test_test_bypass_rejects_wrong_token(backend_module):
+    with backend_module.app.test_request_context(headers={"X-Test-Bypass": "x" * 40}):
+        assert backend_module.is_test_bypass_request() is False
+    with backend_module.app.test_request_context(headers=BYPASS_HEADERS):
+        assert backend_module.is_test_bypass_request() is True
+
+
+def test_mail_token_comparison_rejects_missing_and_wrong_values(backend_module):
+    assert backend_module.mail_token_matches("mail-token") is True
+    assert backend_module.mail_token_matches("wrong") is False
+    assert backend_module.mail_token_matches(None) is False
+    assert backend_module.mail_token_matches("") is False
+
+
+def test_missing_default_route_means_no_trusted_host_gateway(backend_module, monkeypatch):
+    def no_route(*args, **kwargs):
+        raise backend_module.subprocess.CalledProcessError(1, "ip route")
+
+    monkeypatch.setattr(backend_module, "docker_gateway_ip_cache", None)
+    monkeypatch.setattr(backend_module.subprocess, "check_output", no_route)
+    assert backend_module.real_get_docker_gateway_ip() is None
+    assert backend_module.docker_gateway_ip_cache is None

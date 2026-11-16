@@ -27,4 +27,5 @@ tests/**
 !tests/test_integration_backend_api.py
 !tests/requirements.txt
 !docker-compose.yml
+!compose.integration.yml
 !pytest.ini

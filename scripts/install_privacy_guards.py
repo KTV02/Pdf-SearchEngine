@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
-from privacy_check import ROOT, git, git_path
+from privacy_check import GUARD_FILES, ROOT, file_digest, git, git_path
 
 VERSION = '8.30.1'
 CHECKSUMS = {
@@ -35,19 +35,33 @@ def configure_hooks():
             and os.access(p, os.X_OK) for p in default.iterdir()):
         raise RuntimeError('Existing active hooks were preserved; integrate the privacy hooks manually.')
     hooks.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for name in ['pre-commit', 'commit-msg', 'pre-push']:
-        source = ROOT / '.githooks' / name
-        target = hooks / name
-        fd = os.open(target.with_suffix('.tmp'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    def place(data, target, mode):
+        tmp = target.with_name(target.name + '.tmp')
+        if tmp.exists():
+            tmp.unlink()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, 'wb') as f:
-            f.write(source.read_bytes())
-        os.replace(target.with_suffix('.tmp'), target)
-        os.chmod(target, 0o700)
+            f.write(data)
+        os.replace(tmp, target)
+        os.chmod(target, mode)
+
+    # Hooks execute this reviewed copy, so later working-tree edits cannot weaken them.
+    reviewed = {name: file_digest((ROOT / name).read_bytes()) for name in GUARD_FILES}
+    for name in ['pre-commit', 'commit-msg', 'pre-push']:
+        place((ROOT / '.githooks' / name).read_bytes(), hooks / name, 0o700)
+    place((ROOT / 'scripts/privacy_check.py').read_bytes(), hooks / 'privacy_check.py', 0o600)
+    place((json.dumps(reviewed, indent=2, sort_keys=True) + '\n').encode(), hooks / 'reviewed.json', 0o600)
     # Git-local absolute entry points survive checkouts without versioned hooks.
     git('config', '--local', 'core.hooksPath', str(hooks))
 
 
-def install(scanner_only=False):
+def install(scanner_only=False, hooks_only=False):
+    if hooks_only:
+        if not git_path('privacy-tools/gitleaks').is_file():
+            raise RuntimeError('Install the pinned scanner first (run without --hooks-only).')
+        configure_hooks()
+        print('Reviewed privacy hooks and guard copy reinstalled.')
+        return
     system = platform.system().lower()
     machine = platform.machine().lower()
     arch = {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'x64',
@@ -88,9 +102,11 @@ def install(scanner_only=False):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scanner-only', action='store_true')
+    parser.add_argument('--hooks-only', action='store_true',
+                        help='Reinstall reviewed hooks and guard copy after reviewing guard changes.')
     args = parser.parse_args()
     try:
-        install(args.scanner_only)
+        install(args.scanner_only, args.hooks_only)
     except Exception as exc:
         message = str(exc) if isinstance(exc, RuntimeError) else 'Installation failed; raw details suppressed.'
         print(message, file=sys.stderr)

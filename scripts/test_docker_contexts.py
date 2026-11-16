@@ -30,7 +30,7 @@ def main():
         'test': {p.removeprefix('app/') for p in names
                  if re.fullmatch(r'app/(?:backend|email_processor|tests)/[^/]+\.py', p)} |
                 {'backend/requirements.txt', 'email_processor/requirements.txt',
-                 'tests/requirements.txt', 'docker-compose.yml', 'pytest.ini'},
+                 'tests/requirements.txt', 'docker-compose.yml', 'compose.integration.yml', 'pytest.ini'},
     }
     with tempfile.TemporaryDirectory(prefix='public-context-tests-') as td:
         base = Path(td)

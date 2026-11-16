@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import hashlib
+import html
 import ipaddress
 import json
 import os
@@ -14,8 +16,22 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.parse
+import warnings
 
-ROOT = Path(__file__).resolve().parents[1]
+def _repository_root():
+    """Run from the checkout's scripts/ or as the reviewed copy installed in Git's metadata."""
+    here = Path(__file__).resolve().parent
+    if here.name == 'scripts' and (here.parent / '.privacy-policy.json').exists():
+        return here.parent
+    result = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True)
+    return Path(result.stdout.decode().strip()) if result.returncode == 0 else Path.cwd()
+
+
+ROOT = _repository_root()
+GUARD_FILES = ['scripts/privacy_check.py', '.privacy-policy.json', '.gitleaks.toml',
+               '.githooks/pre-commit', '.githooks/commit-msg', '.githooks/pre-push']
+ZERO = '0' * 40
 POLICY = ROOT / '.privacy-policy.json'
 MAX_FILE = 2 * 1024 * 1024
 PRIVATE_DIRS = {'data', 'cloud', 'ocr', 'index_folder', 'tmp', 'logs', 'backups',
@@ -54,8 +70,9 @@ def git(*args, input=None, check=True):
 
 
 def git_path(name):
-    p = Path(git('rev-parse', '--git-path', name).stdout.decode().strip())
-    return p if p.is_absolute() else ROOT / p
+    """Guard state lives in the common Git directory, shared by linked worktrees."""
+    p = Path(git('rev-parse', '--git-common-dir').stdout.decode().strip())
+    return (p if p.is_absolute() else ROOT / p) / name
 
 
 def glob_regex(pattern):
@@ -101,8 +118,8 @@ def path_problem(path, policy, mode='100644'):
 
 
 def example_email(value):
-    if value.lower() == 'git@github.com':  # GitHub SSH transport, not a personal address.
-        return True
+    if value.lower() in {'git@github.com', 'noreply@anthropic.com'}:
+        return True  # GitHub SSH transport and the public co-author trailer address.
     domain = value.rsplit('@', 1)[1].lower()
     return (domain in {'example.com', 'example.org', 'example.net', 'example.test',
                        'users.noreply.github.com', 'noreply.github.com'} or
@@ -125,11 +142,52 @@ def normalize(value):
     return unicodedata.normalize('NFC', value).strip().casefold()
 
 
+WORD = re.compile(r'[^\W_]+(?:[.@+%~\-][^\W_]+)*')
+DELIMITED = re.compile(r'[^\s=:;,"\'`()<>\[\]{}|]{4,2048}')
+BASE64ISH = re.compile(r'[A-Za-z0-9+/_\-]{12,}={0,2}')
+
+
+def canonical(value):
+    """Words of a value joined by single spaces, so punctuation/spacing variants match."""
+    return ' '.join(WORD.findall(normalize(value)))
+
+
 def candidates(text):
-    """Candidates for local salted fingerprints; values never enter diagnostics."""
+    """Candidates for local salted fingerprints, including decoded and normalized forms."""
+    text = unicodedata.normalize('NFC', text)
+    variants = {text}
+    for decode in (urllib.parse.unquote, html.unescape):
+        try:
+            variants.add(unicodedata.normalize('NFC', decode(text)))
+        except Exception:
+            pass
+    for match in BASE64ISH.finditer(text):
+        raw = match.group()
+        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                decoded = decoder(raw + '=' * (-len(raw) % 4)).decode('utf-8')
+            except Exception:
+                continue
+            if decoded.isprintable():
+                variants.add(unicodedata.normalize('NFC', decoded))
+    for variant in variants:
+        yield from _candidates(variant)
+
+
+def _candidates(text):
     yield text.strip()
     for line in text.splitlines():
         yield line.strip()
+        yield line.strip().lstrip('#/*;-> ').strip()
+    for match in DELIMITED.finditer(text):
+        yield match.group()
+        yield match.group().rsplit('/', 1)[-1]
+    words = WORD.findall(text)
+    for start in range(len(words)):
+        for size in range(1, 9):
+            if start + size > len(words):
+                break
+            yield ' '.join(words[start:start + size])
     for match in re.finditer(r'[\w@.+/=:,%!~\-]{4,2048}', text):
         yield match.group()
         yield match.group().rsplit('/', 1)[-1]
@@ -138,7 +196,9 @@ def candidates(text):
         yield value
         yield value.rsplit('/', 1)[-1]
         try:
-            decoded = ast.literal_eval(match.group())
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                decoded = ast.literal_eval(match.group())
             if isinstance(decoded, str):
                 yield decoded
         except (ValueError, SyntaxError):
@@ -150,9 +210,13 @@ def candidates(text):
             yield ' '.join(words[start:])
 
 
-def load_profile():
+def load_profile(required=False):
     p = git_path('privacy/private-fingerprints.json')
     if not p.exists():
+        if required:
+            raise Blocked('The local private-value profile is missing; create it with '
+                          'scripts/privacy_profile.py or explicitly opt out with '
+                          'git config privacy.allowMissingProfile true.')
         return None
     try:
         profile = json.loads(p.read_text())
@@ -186,9 +250,15 @@ def content_problems(data, policy, blob='', profile=None):
                 findings.add((rule, text.count('\n', 0, m.start()) + 1))
     if profile:
         salt, hashes = profile
-        if any(hashlib.sha256((salt + normalize(x)).encode()).hexdigest() in hashes
-               for x in candidates(text)):
-            findings.add(('known-private-local-value', 0))
+        checked = set()
+        for value in candidates(text):
+            value = normalize(value)
+            if len(value) < 5 or value in checked:
+                continue
+            checked.add(value)
+            if hashlib.sha256((salt + value).encode()).hexdigest() in hashes:
+                findings.add(('known-private-local-value', 0))
+                break
     return sorted(findings)
 
 
@@ -229,7 +299,7 @@ def check_build_inputs(entries, read):
             if re.fullmatch(r'app/(?:backend|email_processor|tests)/[^/]+\.py', p)} |
             {'backend/', 'email_processor/', 'tests/', 'backend/requirements.txt',
              'email_processor/requirements.txt', 'tests/requirements.txt',
-             'docker-compose.yml', 'pytest.ini'},
+             'docker-compose.yml', 'compose.integration.yml', 'pytest.ini'},
     }
     for path, allowed in expected.items():
         if path not in names:
@@ -271,6 +341,59 @@ def reference_messages(policy, profile):
             obj = next(line[7:] for line in header.splitlines() if line.startswith('object '))
             kind = next(line[5:] for line in header.splitlines() if line.startswith('type '))
     return messages
+
+
+def file_digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def verify_reviewed_guards(revisions):
+    """Hooks run a reviewed copy; block if committed/staged guard files differ from it."""
+    path = git_path('privacy-hooks/reviewed.json')
+    try:
+        reviewed = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise Blocked('Reinstall the reviewed privacy guards: python3 scripts/install_privacy_guards.py')
+    for revision in revisions:
+        for name in GUARD_FILES:
+            result = git('show', f'{revision}:{name}', check=False)
+            if result.returncode:
+                raise Blocked('Privacy guard is unavailable on this branch; restore reviewed guards '
+                              'before committing or pushing.')
+            if file_digest(result.stdout) != reviewed.get(name):
+                raise Blocked('Guard, policy, or scanner files differ from the locally reviewed copy. '
+                              'Review the change, then rerun python3 scripts/install_privacy_guards.py.')
+
+
+def pushed_updates(stream):
+    """Parse pre-push input: the exact commits and destination names being sent."""
+    tips, names = [], []
+    for line in stream.read().splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        local_ref, local_sha, remote_ref, _ = parts
+        names += [local_ref, remote_ref]
+        if local_sha != ZERO:
+            tips.append(local_sha)
+    return tips, names
+
+
+def local_build_overrides():
+    """Untracked Dockerfile-specific ignore files would replace the reviewed allowlists."""
+    tracked = set(git('ls-files', '-z').stdout.decode().split('\0'))
+    found = 0
+    for folder in ['app', 'app/backend', 'app/email_processor', 'app/tests']:
+        base = ROOT / folder
+        if not base.is_dir():
+            continue
+        for item in base.iterdir():
+            rel = f'{folder}/{item.name}'
+            if item.name.endswith('.dockerignore') and item.name != '.dockerignore' and rel not in tracked:
+                found += 1
+    if found:
+        raise Blocked('An untracked Dockerfile-specific .dockerignore would override the reviewed '
+                      'build allowlists; remove it or review it as public source.')
 
 
 def scanner_path():
@@ -316,13 +439,19 @@ def inspect_snapshot(entries, policy, seen, profile, stage_bytes=None):
     return lambda p: blob_bytes(objects[p])
 
 
-def main(argv=None):
+def main(argv=None, stdin=None):
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--staged', action='store_true')
     group.add_argument('--history', action='store_true')
     group.add_argument('--commit-message', type=Path)
+    parser.add_argument('--hook', choices=['pre-commit', 'commit-msg', 'pre-push'])
     args = parser.parse_args(argv)
+    tips, push_names = [], []
+    if args.hook == 'pre-push':
+        tips, push_names = pushed_updates(stdin or sys.stdin)
+    if args.hook:
+        verify_reviewed_guards([':0'] if args.hook != 'pre-push' else ['HEAD', *tips])
     policy_source = ':0:.privacy-policy.json' if (args.staged or args.commit_message) else 'HEAD:.privacy-policy.json'
     result = git('show', policy_source, check=False)
     if result.returncode:
@@ -332,7 +461,8 @@ def main(argv=None):
     config = git('show', config_source, check=False)
     if config.returncode or config.stdout != (ROOT / '.gitleaks.toml').read_bytes():
         raise Blocked('Stage/commit scanner configuration changes before privacy checking.')
-    profile = load_profile()
+    allow_missing = git('config', '--bool', 'privacy.allowMissingProfile', check=False).stdout.strip() == b'true'
+    profile = load_profile(required=bool(args.hook) and not allow_missing)
     seen = set()
     if args.commit_message:
         data = args.commit_message.read_bytes()
@@ -349,12 +479,15 @@ def main(argv=None):
         entries = snapshot(staged=True)
         read = inspect_snapshot(entries, policy, seen, profile, payloads)
         check_build_inputs(entries, read)
+        local_build_overrides()
         run_scanner('stdin', b'\n'.join(payloads))
     else:
-        roots = set(git('rev-list', '--max-parents=0', '--all').stdout.decode().split())
+        if any(content_problems(name.encode(), policy, profile=profile) for name in push_names):
+            raise Blocked('A pushed reference name contains potentially private content; name suppressed.')
+        roots = set(git('rev-list', '--max-parents=0', '--all', *tips).stdout.decode().split())
         if not roots or not roots.issubset(set(policy['allowed_roots'])):
             raise Blocked('Unreviewed/older root history detected; publish from the clean upstream checkout.')
-        commits = git('rev-list', '--all').stdout.decode().split()
+        commits = git('rev-list', '--all', *tips).stdout.decode().split()
         messages = reference_messages(policy, profile)
         for sha in commits:
             raw = git('show', '-s', '--format=%an%x00%ae%x00%cn%x00%ce%x00%B', sha).stdout
@@ -369,7 +502,8 @@ def main(argv=None):
         current = snapshot(commit='HEAD')
         read = lambda p: blob_bytes(dict((p, obj) for p, _, obj in current)[p])
         check_build_inputs(current, read)
-        run_scanner('git')
+        local_build_overrides()
+        run_scanner('git', log_options=' '.join(['--all', *tips]))
         run_scanner('stdin', b'\n'.join(messages))
     print('Privacy checks passed. Review new prose, examples, and policy changes before publication.')
     return 0

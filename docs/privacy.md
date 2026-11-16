@@ -12,7 +12,7 @@ cd PdfSearchEngine
 python3 scripts/install_privacy_guards.py
 ```
 
-The installer verifies a pinned Gitleaks release checksum and enables this checkout's commit, commit-message, and push hooks. Their local entry points live inside Git's internal directory, so switching to a branch without the guard files blocks commits/pushes instead of silently disabling the checks. It does not change global Git settings, deploy services, or replace existing custom hooks. New clones need this setup; hooks are not automatically enabled by Git.
+The installer verifies a pinned Gitleaks release checksum and enables this checkout's commit, commit-message, and push hooks. The hooks and a reviewed copy of the checker live inside Git's common internal directory (shared by linked worktrees), so editing the working-tree checker cannot weaken them, and switching to a branch without the guard files blocks commits/pushes instead of silently disabling the checks. The installer also records digests of the checker, policy, scanner configuration, and hooks. When any of those files change in a commit or pull, the hooks block until you review the change and run `python3 scripts/install_privacy_guards.py --hooks-only`. It does not change global Git settings, deploy services, or replace existing custom hooks. New clones need this setup; hooks are not automatically enabled by Git.
 
 Use a reviewed public author alias listed in `.privacy-policy.json` and your own GitHub noreply email in this checkout's local Git configuration. The guard rejects unreviewed names and personal email addresses without printing them. Review policy updates for additional contributors rather than disabling this check.
 
@@ -30,6 +30,8 @@ After changing local settings or adding private documents, refresh the optional 
 python3 scripts/privacy_profile.py --refresh-local
 ```
 
+The hooks require this profile. In a separate development checkout, copy the owner-only file `.git/privacy/private-fingerprints.json` from the installation checkout (it contains only salted fingerprints), or refresh it there. Only for a checkout that never sees private values, opt out explicitly with `git config privacy.allowMissingProfile true`.
+
 This reads local configuration and this checkout's labeled Docker runtime, when available, and remembers salted fingerprints of private values and document names. It does not extract document text, send values elsewhere, start services, or store plaintext credentials. The profile stays under Git's internal directory with owner-only file permissions. It is never committed or copied into the supported build contexts. It is an extra guard for this installation; CI does not need or receive its private profile. Unmounted/unreadable locations may require a separately supplied local profile. Refreshing does not replace review.
 
 ## Develop and push features
@@ -45,7 +47,7 @@ git commit -m "Describe the reusable change"
 git push -u origin HEAD
 ```
 
-The commit hook checks the entire staged snapshot; ignored local configuration does not need to be removed. The push hook checks all locally reachable history and rejects an independent/older root, private paths, suspicious content, or unreviewed author identities. It also runs full-history credential scanning. Changes on multiple local branches are checked, so move unrelated private experiments to a separate private repository rather than bypassing the hook.
+The commit hook checks the entire staged snapshot; ignored local configuration does not need to be removed. The push hook checks the exact commits and destination names being pushed plus all locally reachable history and rejects an independent/older root, private paths, suspicious content, or unreviewed author identities. It also runs full-history credential scanning. Changes on multiple local branches are checked, so move unrelated private experiments to a separate private repository rather than bypassing the hook.
 
 The `Publication privacy` Actions workflow repeats public checks upstream and tests real Docker context exports with synthetic private files. A repository owner should require that check in GitHub branch protection/rulesets before public collaboration; the workflow alone does not prevent a direct push. Do not bypass hooks or force-add private files. Changes to `.privacy-policy.json`, the scanner configuration, hooks, or workflow need deliberate review.
 
@@ -75,3 +77,11 @@ python3 scripts/privacy_check.py --history
 ```
 
 Review all references and staged files, new documentation/examples, metadata, image layers, releases, and artifacts. Keep the old private repository/history and private local backups separate. Current source exclusions do not clean earlier Docker images or recall earlier downloads. Do not distribute the previously identified sensitive images; rebuild and inspect replacements separately. Resolve the production test-bypass finding separately before treating production as hardened. Repository visibility changes require an explicit decision after these checks.
+
+## Integration tests
+
+Run `scripts/run_integration_tests.sh`. It starts a separate, isolated Compose project with throwaway volumes, no published ports, an internal network, and fresh random tokens. The installation stack has no test bypass; never add `PDFSEARCH_TEST_MODE` or `TEST_BYPASS_TOKEN` to installation settings.
+
+## Where enforcement ends
+
+Local hooks cannot stop `--no-verify`, `-c core.hooksPath=...`, clones without the installer, or uploads and edits made in GitHub's web interface. For the public repository, enable GitHub secret scanning and push protection, and require the `Publication privacy` check through a ruleset. CI detects problems only after a push.

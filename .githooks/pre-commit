@@ -1,8 +1,10 @@
 #!/bin/sh
+# Runs the reviewed checker copy installed in Git's metadata, never the working-tree file.
 set -eu
-root=$(git rev-parse --show-toplevel)
-if [ ! -f "$root/scripts/privacy_check.py" ]; then
-    echo "Privacy guard is unavailable on this branch; restore reviewed guards before committing or pushing." >&2
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+checker="$common/privacy-hooks/privacy_check.py"
+if [ ! -f "$checker" ]; then
+    echo "Privacy guard is unavailable on this checkout; review the guard files and run python3 scripts/install_privacy_guards.py." >&2
     exit 1
 fi
-exec python3 "$root/scripts/privacy_check.py" --staged
+exec python3 "$checker" --hook pre-commit --staged

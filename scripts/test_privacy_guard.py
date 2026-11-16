@@ -34,8 +34,19 @@ class PublicationTests(unittest.TestCase):
         shutil.copy2(guard.scanner_path(), tool)
         self.git('config', 'user.name', 'PDFSearch contributors')
         self.git('config', 'user.email', 'contributors@users.noreply.github.com')
-        self.git('config', 'core.hooksPath', '.githooks')
+        self.git('config', 'privacy.allowMissingProfile', 'true')
         self.git('add', '--all')
+        self.install_reviewed_hooks()
+
+    def install_reviewed_hooks(self):
+        with mock.patch.object(guard, 'ROOT', self.repo), \
+                mock.patch.object(install_privacy_guards, 'ROOT', self.repo):
+            install_privacy_guards.configure_hooks()
+
+    def seed_profile(self, *values):
+        result = subprocess.run([sys.executable, str(self.repo / 'scripts/privacy_profile.py')],
+                                input=json.dumps(list(values)).encode(), capture_output=True, cwd=self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def git(self, *args, input=None):
         return subprocess.run(['git', '-C', str(self.repo), *args], input=input,
@@ -164,7 +175,7 @@ class PublicationTests(unittest.TestCase):
         result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         result = subprocess.run(['sh', str(self.repo / '.githooks/pre-push')],
-                                cwd=self.repo, capture_output=True)
+                                cwd=self.repo, capture_output=True, input=b'')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_real_commit_message_hook_blocks_private_prose(self):
@@ -234,6 +245,111 @@ class PublicationTests(unittest.TestCase):
         result = self.check('--commit-message', str(p))
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(message.encode(), result.stderr)
+
+    # Regression tests for bypasses found in the independent audit.
+
+    def test_tampered_working_tree_checker_cannot_weaken_the_commit_hook(self):
+        (self.repo / 'scripts/privacy_check.py').write_text('import sys\nsys.exit(0)\n')
+        path = 'app/data/synthetic-private-name.json'
+        self.write(path, '{}')
+        self.git('add', '-f', path)
+        result = self.git('commit', '-qm', 'Synthetic attempted private addition')
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_staged_policy_weakening_requires_local_review(self):
+        policy = json.loads((self.repo / '.privacy-policy.json').read_text())
+        policy['public_paths'].append('**')
+        self.write('.privacy-policy.json', json.dumps(policy, indent=2) + '\n')
+        self.write('notes/unreviewed.txt', 'synthetic note\n')
+        self.git('add', '--all')
+        result = self.git('commit', '-qm', 'Update policy')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'locally reviewed copy', result.stderr)
+
+    def installed_hook(self, name):
+        return Path(self.git('config', '--get', 'core.hooksPath').stdout.decode().strip()) / name
+
+    def test_push_of_an_unreferenced_commit_is_inspected(self):
+        result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        path = 'app/data/synthetic-private-name.json'
+        self.write(path, '{}')
+        self.git('add', '-f', path)
+        committed = self.git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Synthetic private commit')
+        self.assertEqual(committed.returncode, 0)
+        sha = self.git('rev-parse', 'HEAD').stdout.decode().strip()
+        self.git('reset', '-q', '--hard', 'HEAD~1')
+        self.assertEqual(self.git('for-each-ref', '--contains', sha).stdout, b'')
+        line = f'refs/heads/x {sha} refs/heads/x {guard.ZERO}\n'.encode()
+        clean = subprocess.run(['sh', str(self.installed_hook('pre-push')), 'origin', 'url'],
+                               cwd=self.repo, capture_output=True, input=b'')
+        self.assertEqual(clean.returncode, 0, clean.stderr.decode())
+        result = subprocess.run(['sh', str(self.installed_hook('pre-push')), 'origin', 'url'],
+                                cwd=self.repo, capture_output=True, input=line)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(b'synthetic-private-name', result.stdout + result.stderr)
+
+    def test_missing_profile_blocks_hooks_unless_explicitly_allowed(self):
+        self.git('config', '--unset', 'privacy.allowMissingProfile')
+        result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'profile is missing', result.stderr)
+        self.seed_profile('synthetic-profile-' + 'placeholder-value')
+        result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_linked_worktree_shares_reviewed_guards_and_profile(self):
+        value = 'synthetic-worktree' + '-private-value'
+        self.seed_profile(value)
+        result = self.git('commit', '--allow-empty', '-qm', 'Add reviewed publication controls')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        worktree = Path(self.temp.name) / 'linked'
+        result = self.git('worktree', 'add', '-q', str(worktree), '-b', 'linked-feature')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        run = lambda *a: subprocess.run(['git', '-C', str(worktree), *a], capture_output=True)
+        (worktree / 'docs/feature.md').write_text('Harmless synthetic documentation.\n')
+        run('add', 'docs/feature.md')
+        result = run('commit', '-qm', 'Document synthetic feature')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        (worktree / 'docs/feature.md').write_text('mentions ' + value + '\n')
+        run('add', 'docs/feature.md')
+        result = run('commit', '-qm', 'Document synthetic feature')
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_known_values_are_found_in_common_variants(self):
+        import base64
+        import unicodedata
+        import urllib.parse
+        secret = 'Zq8VtR3m' + 'Lw7pXc2Nh5Ks'
+        stem = 'Zorblat Synthetik ' + 'Quenhof 2031'
+        host = 'nas-synthetik.example' + '-family.de'
+        umlaut = 'Quorbel Bescheyd ' + 'Zw\u00fclbstra\u00dfe 2031.pdf'
+        self.seed_profile(secret, stem + '.pdf', 'https://' + host + ':8443/api', umlaut)
+        cases = {
+            'suffix punctuation': f'# value={secret};',
+            'document stem in prose': f'# the {stem} contract was scanned',
+            'document name with other separators': '# ' + stem.replace(' ', '_') + '.pdf',
+            'bare hostname': f'# backup host {host}',
+            'base64': '# ' + base64.b64encode(secret.encode()).decode(),
+            'url-encoded': '# ' + urllib.parse.quote(stem + '.pdf'),
+            'decomposed unicode': '# ' + unicodedata.normalize('NFD', umlaut),
+        }
+        for label, line in cases.items():
+            with self.subTest(label):
+                original = (self.repo / 'app/backend/task_queue.py').read_text()
+                self.write('app/backend/task_queue.py', original + '\n' + line + '\n')
+                self.git('add', 'app/backend/task_queue.py')
+                result = self.check('--staged')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'known-private-local-value', result.stderr)
+                self.write('app/backend/task_queue.py', original)
+                self.git('add', 'app/backend/task_queue.py')
+
+    def test_untracked_dockerfile_specific_ignore_blocks_checks(self):
+        self.write('app/backend/Dockerfile.dockerignore', '!*\n')
+        result = self.check('--staged')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Dockerfile-specific', result.stderr)
 
 
 if __name__ == '__main__':

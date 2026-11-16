@@ -42,10 +42,43 @@ def test_compose_exposes_cloud_mount_and_sync_config():
 
 
 def test_compose_exposes_integration_test_timing_config():
-    compose_file = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+    compose_file = Path(__file__).resolve().parents[1] / "compose.integration.yml"
     compose = compose_file.read_text()
 
     assert "INTEGRATION_REQUEST_TIMEOUT" in compose
     assert "INTEGRATION_TASK_TIMEOUT" in compose
     assert "INTEGRATION_SEARCH_TIMEOUT" in compose
     assert "INTEGRATION_SKIP_COORDINATOR_BLOCKED" in compose
+
+
+def test_installation_compose_never_enables_the_test_bypass():
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text()
+
+    assert "TEST_BYPASS_TOKEN" not in compose
+    assert "PDFSEARCH_TEST_MODE" not in compose
+    assert "test-runner" not in compose
+
+
+def test_integration_stack_is_isolated_and_uses_generated_tokens():
+    compose = (Path(__file__).resolve().parents[1] / "compose.integration.yml").read_text()
+
+    assert "name: pdfsearch-integration" in compose
+    assert "internal: true" in compose
+    assert "ports:" not in compose
+    assert "${INTEGRATION_BYPASS_TOKEN:?" in compose
+    assert "${INTEGRATION_MAIL_TOKEN:?" in compose
+    assert "./data" not in compose and "HOST_PATH" not in compose
+
+
+def test_frontend_third_party_scripts_are_pinned_with_integrity():
+    import re
+    import pytest
+    page = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
+    if not page.exists():
+        pytest.skip("frontend is not part of the isolated test image")
+    html = page.read_text()
+    external = re.findall(r'<script[^>]+src="https?://[^"]+"[^>]*>', html)
+    assert external
+    for tag in external:
+        assert 'integrity="sha384-' in tag and 'crossorigin="anonymous"' in tag
+        assert re.search(r'@\d+\.\d+\.\d+/', tag)
