@@ -1,6 +1,7 @@
 import io
 import logging
 import shutil
+import threading
 import zipfile
 from pathlib import Path
 
@@ -987,6 +988,111 @@ def test_download_returns_authorized_pdf(backend_module):
     assert response.mimetype == "application/pdf"
 
 
+def test_indexed_preview_rechecks_access_and_reuses_path_across_ranges(backend_module, monkeypatch):
+    pdf_path = Path(backend_module.PDF_FOLDER) / "test_index" / "doc.pdf"
+    write_blank_pdf(pdf_path)
+    ix, _ = backend_module.create_or_open_index("test_index", check_access=False)
+    with ix.writer() as writer:
+        writer.add_document(id="doc", path=str(pdf_path), content="synthetic OCR")
+
+    original_open = backend_module.index.open_dir
+    opens = []
+
+    def count_open(directory):
+        opens.append(directory)
+        return original_open(directory)
+
+    monkeypatch.setattr(backend_module.index, "open_dir", count_open)
+    client = backend_module.app.test_client()
+    params = {"index_name": "test_index", "id": "doc", "page": "all"}
+    reader = {"Tailscale-User-Login": "reader@example.com"}
+    href = "/preview"
+    head = client.head(href, query_string=params, headers=reader)
+    assert head.status_code == 200
+    assert head.data == b""
+    assert head.content_length == pdf_path.stat().st_size
+    assert "private" in head.headers["Cache-Control"]
+
+    for ranges, expected in (("bytes=0-7", pdf_path.read_bytes()[:8]),
+                              ("bytes=-8", pdf_path.read_bytes()[-8:])):
+        response = client.get(href, query_string=params, headers={**reader, "Range": ranges})
+        assert response.status_code == 206
+        assert response.headers["Accept-Ranges"] == "bytes"
+        assert response.data == expected
+        response.close()
+
+    assert client.get(href, query_string=params, headers={
+        **reader, "Range": "bytes=999999-",
+    }).status_code == 416
+    assert client.get(href, query_string=params, headers={
+        **reader, "If-None-Match": head.headers["ETag"],
+    }).status_code == 304
+    assert len(opens) == 1
+
+    access = backend_module.load_access_config()
+    access["users"]["reader@example.com"]["read"] = []
+    backend_module.save_access_config(access)
+    assert client.get(href, query_string=params, headers=reader).status_code == 403
+    assert len(opens) == 1
+
+    replacement = pdf_path.with_name("replacement.pdf")
+    write_text_pdf(replacement, "replacement content")
+    with ix.writer() as writer:
+        writer.update_document(id="doc", path=str(replacement), content="replacement OCR")
+    admin = {"Tailscale-User-Login": "admin@example.com"}
+    response = client.get(href, query_string=params, headers=admin)
+    assert response.data == replacement.read_bytes()
+    response.close()
+    assert len(opens) == 2
+
+    with ix.writer() as writer:
+        writer.delete_by_term("id", "doc")
+    assert client.get(href, query_string=params, headers=admin).status_code == 404
+    assert len(opens) == 3
+
+
+def test_preview_releases_stream_slot_when_client_closes(backend_module, monkeypatch):
+    pdf_path = Path(backend_module.PDF_FOLDER) / "test_index" / "doc.pdf"
+    write_blank_pdf(pdf_path)
+    monkeypatch.setattr(backend_module, "PREVIEW_REQUESTS", threading.BoundedSemaphore(1))
+    client = backend_module.app.test_client()
+    params = {"path": str(pdf_path), "page": "all"}
+    with client.get("/preview", query_string=params, headers=BYPASS_HEADERS, buffered=False) as stream:
+        assert stream.status_code == 200
+        busy = client.get("/preview", query_string=params, headers=BYPASS_HEADERS)
+        assert busy.status_code == 503
+        assert busy.headers["Retry-After"] == "1"
+        assert busy.headers["Cache-Control"] == "no-store"
+    with client.get("/preview", query_string=params, headers=BYPASS_HEADERS) as retry:
+        assert retry.status_code == 200
+
+
+def test_busy_page_work_leaves_native_preview_available(backend_module, monkeypatch):
+    pdf_path = Path(backend_module.PDF_FOLDER) / "test_index" / "doc.pdf"
+    write_text_pdf(pdf_path, "synthetic needle")
+    monkeypatch.setattr(backend_module, "PDF_PAGE_WORK", threading.BoundedSemaphore(1))
+    client = backend_module.app.test_client()
+    params = {"path": str(pdf_path)}
+    with backend_module.PDF_PAGE_WORK:
+        assert client.get("/preview", query_string=params, headers=BYPASS_HEADERS).status_code == 503
+        assert client.get("/find-hit-page", query_string={**params, "q": "needle"},
+                          headers=BYPASS_HEADERS).status_code == 503
+        with client.head("/preview", query_string={**params, "page": "all"},
+                         headers=BYPASS_HEADERS) as native:
+            assert native.status_code == 200
+    assert client.get("/find-hit-page", query_string={**params, "q": "needle"},
+                      headers=BYPASS_HEADERS).json == {"page": 1}
+    with client.get("/preview", query_string=params, headers=BYPASS_HEADERS) as page:
+        assert page.status_code == 200
+        assert page.data.startswith(b"%PDF")
+    assert not list(Path(backend_module.TMP_FOLDER).glob("*.pdf"))
+    with client.post("/download", json={**params, "pages": [1]}, headers=BYPASS_HEADERS) as download:
+        assert download.status_code == 200
+        assert download.headers["Content-Disposition"].startswith("attachment;")
+        assert download.data.startswith(b"%PDF")
+    assert not list(Path(backend_module.TMP_FOLDER).glob("*.pdf"))
+
+
 def test_low_data_preview_page_returns_rendered_jpeg(backend_module, monkeypatch):
     pdf_path = Path(backend_module.PDF_FOLDER) / "test_index" / "doc.pdf"
     write_blank_pdf(pdf_path)
@@ -994,10 +1100,13 @@ def test_low_data_preview_page_returns_rendered_jpeg(backend_module, monkeypatch
     preview_image.parent.mkdir(parents=True, exist_ok=True)
     preview_image.write_bytes(b"\xff\xd8preview\xff\xd9")
 
-    def fake_render_low_data_preview_page(path, page_num):
+    def fake_render_low_data_preview_page(path, page_num, cache_path, index_name, cloud_config):
         assert path == str(pdf_path)
         assert page_num == 1
-        return str(preview_image)
+        assert index_name == "test_index"
+        assert cloud_config is None
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(cache_path).write_bytes(preview_image.read_bytes())
 
     monkeypatch.setattr(
         backend_module,
@@ -1883,21 +1992,6 @@ def test_onedrive_low_data_preview_uploads_hidden_cloud_preview(backend_module, 
     config = backend_module.load_index_config("test_index")
     pdf_path = Path(config["cloud"]["root_path"]) / "one" / "preview.pdf"
     write_text_pdf(pdf_path, "preview text")
-    monkeypatch.setattr(
-        backend_module,
-        "find_document_metadata_by_path",
-        lambda path: (
-            "test_index",
-            {
-                "id": "cloud-doc",
-                "title": "preview.pdf",
-                "path": str(pdf_path),
-                "source": "cloud",
-                "virtual_path": "OneDrive/one/preview.pdf",
-                "cloud_relative_path": "one/preview.pdf",
-            },
-        ),
-    )
     uploads = []
     monkeypatch.setattr(
         backend_module,
@@ -1910,13 +2004,13 @@ def test_onedrive_low_data_preview_uploads_hidden_cloud_preview(backend_module, 
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"jpg")
 
-    result = backend_module.sync_low_data_preview_to_provider(str(pdf_path), str(cache_path))
+    result = backend_module.sync_low_data_preview_to_provider("test_index", config, str(cache_path))
 
     assert result == {"remote_path": "Tracked/.pdfsearchengine/previews/test_index/ab/cache.jpg"}
     assert uploads == [("Tracked/.pdfsearchengine/previews/test_index/ab/cache.jpg", str(cache_path), "image/jpeg")]
 
 
-def test_cloud_low_data_preview_cache_uses_hidden_cloud_folder(backend_module, tmp_path):
+def test_cloud_low_data_preview_cache_uses_hidden_cloud_folder(backend_module, tmp_path, monkeypatch):
     cloud_root = tmp_path / "drive"
     cloud_pdf = cloud_root / "one" / "preview.pdf"
     write_text_pdf(cloud_pdf, "cloud preview cache text")
@@ -1933,10 +2027,21 @@ def test_cloud_low_data_preview_cache_uses_hidden_cloud_folder(backend_module, t
     )
     backend_module.run_cloud_sync_task("test_index", "cloud-task-preview", "test")
 
-    cache_path = Path(backend_module.get_low_data_preview_cache_path(str(cloud_pdf), 1))
+    def fake_render(pdf_path, page_num, cache_path, index_name, cloud_config):
+        assert cloud_config["cloud"]["root_path"] == str(cloud_root)
+        output = Path(cache_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"synthetic preview")
 
-    assert cache_path.is_relative_to(cloud_root / ".pdfsearchengine" / "previews" / "test_index")
-    assert cache_path.suffix == ".jpg"
+    monkeypatch.setattr(backend_module, "render_low_data_preview_page", fake_render)
+    with backend_module.app.test_client().get(
+        "/preview", query_string={"path": str(cloud_pdf), "page": "1", "low_data": "1"},
+        headers=BYPASS_HEADERS,
+    ) as response:
+        assert response.status_code == 200
+        assert response.mimetype == "image/jpeg"
+    preview_folder = cloud_root / ".pdfsearchengine" / "previews" / "test_index"
+    assert len(list(preview_folder.glob("*/*.jpg"))) == 1
 
 
 def test_hybrid_cloud_sync_prefers_identical_cloud_file_over_standalone_copy(backend_module, tmp_path):

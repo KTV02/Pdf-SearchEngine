@@ -5,6 +5,7 @@ const SearchManager = {
             results: [],
             searchSubmitted: false,
             previewUrl: null,
+            hitPageRequest: null,
             selectedPages: '',
             searchMode: 'keyword',
             similaritySourceTitle: '',
@@ -23,6 +24,12 @@ const SearchManager = {
         };
     },
     watch: {
+        selectedIndex() {
+            this.closeSearchPreviews();
+        },
+        activeTab(tab) {
+            if (tab !== 'search') this.closeSearchPreviews();
+        },
         lowDataMode(enabled) {
             try {
                 localStorage.setItem('pdfSearchLowDataMode', enabled ? 'true' : 'false');
@@ -48,7 +55,7 @@ const SearchManager = {
                 page: String(page)
             });
             if (result.id) params.set('id', result.id);
-            if (result.path) params.set('path', result.path);
+            else if (result.path) params.set('path', result.path);
 
             if (this.lowDataMode) {
                 params.set('low_data', '1');
@@ -67,12 +74,18 @@ const SearchManager = {
                 }
             });
         },
+        closeSearchPreviews() {
+            this.hitPageRequest?.abort();
+            this.hitPageRequest = null;
+            this.results.forEach(result => { result.previewVisible = false; });
+        },
         search() {
             if (!this.selectedIndex) {
                 alert("Please select an index to search.");
                 return;
             }
-            this.searchSubmitted = true; // Mark search as submitted
+            this.closeSearchPreviews();
+            this.searchSubmitted = true;
             this.searchMode = 'keyword';
             this.similaritySourceTitle = '';
             this.similarityUploadVisible = false;
@@ -92,20 +105,13 @@ const SearchManager = {
                     alert("An error occurred while searching. Please try again.");
                 });
         },
-        previewPage(result, index) {
-            // Hide other previews
-            this.results.forEach((res, idx) => {
-                if (idx !== index) res.previewVisible = false;
-            });
-
-            // If already visible, toggle off
-            if (result.previewVisible) {
-                result.previewVisible = false;
-                return;
-            }
+        previewPage(result) {
+            const close = result.previewVisible && result.previewMode === 'page'
+                || this.hitPageRequest?.result === result;
+            this.closeSearchPreviews();
+            if (close) return;
 
             result.previewMode = 'page';
-
             if (this.searchMode === 'similar') {
                 result.previewPageNumber = 1;
                 result.previewUrl = this.buildPreviewUrl(result, 1);
@@ -113,40 +119,42 @@ const SearchManager = {
                 return;
             }
 
-            // Set loading state here if you want a spinner later
+            const controller = new AbortController();
+            this.hitPageRequest = { result, abort: () => controller.abort() };
             api.get('/find-hit-page', {
+                signal: controller.signal,
                 params: {
                     index_name: this.selectedIndex,
                     id: result.id,
-                    path: result.path,
+                    path: result.id ? undefined : result.path,
                     q: this.query
                 }
             }).then(response => {
+                if (controller.signal.aborted || !this.results.includes(result)) return;
                 const page = response.data.page;
                 if (page && page > 0) {
                     result.previewPageNumber = page;
                     result.previewUrl = this.buildPreviewUrl(result, page);
-                    result.previewVisible = true;  // ✅ only now show it
+                    result.previewVisible = true;
                 } else {
                     alert("Keyword not found in document.");
                 }
-            }).catch(err => {
-                alert("Error determining keyword hit page.");
+            }).catch(error => {
+                if (controller.signal.aborted) return;
+                alert(error.response?.data?.error || "Error determining keyword hit page.");
+            }).finally(() => {
+                if (!controller.signal.aborted) this.hitPageRequest = null;
             });
         },
-        previewPdf(result, index) {
-            // Hide other previews if one is already visible
-            this.results.forEach((res, idx) => {
-                if (idx !== index) res.previewVisible = false;
-            });
+        previewPdf(result) {
+            const close = result.previewVisible && result.previewMode === 'pdf';
+            this.closeSearchPreviews();
+            if (close) return;
 
-            // Toggle visibility and set preview URL for the selected result
-            result.previewVisible = !result.previewVisible;
-            if (result.previewVisible) {
-                result.previewMode = 'pdf';
-                result.previewPageNumber = null;
-                result.previewUrl = this.buildPreviewUrl(result, 'all');
-            }
+            result.previewMode = 'pdf';
+            result.previewPageNumber = null;
+            result.previewUrl = this.buildPreviewUrl(result, 'all');
+            result.previewVisible = true;
         },
         handleSimilarityFileUpload(event) {
             this.similarityUploadFile = event.target.files[0] || null;

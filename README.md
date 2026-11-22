@@ -65,6 +65,12 @@ Each index can use standalone local storage, a cloud source, or a hybrid mode. T
 
 Set `BACKUP_ENABLED=true`, `BACKUP_INTERVAL_HOURS`, `BACKUP_RETENTION_COUNT`, and optionally `BACKUP_STORAGE_HOST_PATH` to enable scheduled snapshots, or use the Admin interface to run a backup. Snapshots can contain documents and credentials. Store them somewhere private and test restores independently; a backup on the same disk does not protect against disk loss.
 
+## PDF previews
+
+**Preview PDF** uses the browser's PDF viewer and streams the original file with HTTP byte ranges. The backend checks index access on each request and reuses the document path while the Whoosh index directory revision remains current. **Preview Page** finds the keyword in the PDF and opens the matching page. **Low Data Preview** shows grayscale page images and requests them one at a time as you scroll. The existing PDF download actions are available in either mode.
+
+Each backend process serves up to 12 active preview and hit-page requests, including open PDF streams. Up to two requests can parse or extract PDF pages at a time, and only one can render a low-data cache miss. Busy requests return HTTP 503 with a one-second retry delay. The low-data viewer retries busy page images automatically. Reopen a native or single-page preview to retry it. Closing a preview releases the file stream when the server observes the disconnect. Page work already running on the server can finish within the same concurrency limit.
+
 ## Safe development with local customization
 
 Install the publication guards in each development checkout:

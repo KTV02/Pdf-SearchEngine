@@ -20,6 +20,9 @@ import zipfile
 import re
 import logging
 from contextlib import contextmanager
+from functools import lru_cache, wraps
+from werkzeug.exceptions import HTTPException
+from werkzeug.wsgi import ClosingIterator
 from datetime import datetime, timedelta
 from werkzeug.datastructures import MultiDict
 import subprocess
@@ -230,6 +233,10 @@ CLAMAV_RETRY_SECONDS = get_env_float("CLAMAV_RETRY_SECONDS", 2.0)
 REQUEST_CLIENT_IDLE_SECONDS = max(30, get_env_int("REQUEST_CLIENT_IDLE_SECONDS", 180))
 LOW_DATA_PREVIEW_DPI = get_env_int("LOW_DATA_PREVIEW_DPI", 55)
 LOW_DATA_PREVIEW_JPEG_QUALITY = get_env_int("LOW_DATA_PREVIEW_JPEG_QUALITY", 30)
+PREVIEW_REQUESTS = threading.BoundedSemaphore(12)
+PDF_PAGE_WORK = threading.BoundedSemaphore(2)
+LOW_DATA_RENDER_LOCK = threading.Lock()
+DOCUMENT_PATH_CACHE_LOCK = threading.Lock()
 LOW_DATA_PREVIEW_CACHE_FOLDER = os.path.join(TMP_FOLDER, "preview-cache")
 os.makedirs(LOW_DATA_PREVIEW_CACHE_FOLDER, exist_ok=True)
 
@@ -3098,12 +3105,7 @@ def delete_cloud_provider_document(index_name, metadata):
     return delete_provider_file_by_path(provider, connection, remote_file_path)
 
 
-def sync_low_data_preview_to_provider(pdf_path, cache_path):
-    index_name, metadata = find_document_metadata_by_path(pdf_path)
-    if not index_name or not metadata or metadata.get("source") != "cloud":
-        return None
-
-    config = load_index_config(index_name)
+def sync_low_data_preview_to_provider(index_name, config, cache_path):
     cloud = config.get("cloud") or {}
     provider = cloud.get("provider")
     if provider not in {ONEDRIVE_CLOUD_PROVIDER, GOOGLE_DRIVE_CLOUD_PROVIDER, DROPBOX_CLOUD_PROVIDER}:
@@ -3613,7 +3615,7 @@ def get_document_metadata_entry(index_name, doc_id):
 
 def find_document_metadata_by_path(pdf_path, accessible_indices=None):
     full_path = os.path.realpath(os.path.normpath(unquote(pdf_path or "")))
-    candidate_indices = accessible_indices or discover_indices()
+    candidate_indices = discover_indices() if accessible_indices is None else accessible_indices
     for index_name in candidate_indices:
         try:
             payload = ensure_document_metadata(index_name)
@@ -3897,7 +3899,7 @@ def get_current_principal():
 
 def get_accessible_indices(action="read"):
     principal = get_current_principal()
-    if principal["is_admin"]:
+    if principal["is_admin"] and principal["type"] in {"local", "ip"}:
         return load_access_config().get("indices", [])
     if action == "write":
         return principal.get("write", [])
@@ -4001,9 +4003,8 @@ def block_internal_requests_except_add_document():
         g.skip_antivirus = False
         log_request_client_activity()
 
-    is_host = get_docker_gateway_ip() == remote_ip
     # Internal app containers may only call the mail ingestion endpoint.
-    if is_internal and not is_host and not test_bypass:
+    if is_internal and not test_bypass and get_docker_gateway_ip() != remote_ip:
         if request.path == "/add-document":
             token = request.headers.get("X-Mail-Token")
             if not mail_token_matches(token):
@@ -5496,6 +5497,15 @@ def serve_frontend(path):
 # Browser-origin policy is installed immediately after Flask initialization.
 
 
+@lru_cache(maxsize=256)
+def indexed_document_path(index_folder, revision, doc_id):
+    # Only retain the path. The stored document can include the full OCR text.
+    ix = index.open_dir(index_folder)
+    with ix.searcher() as searcher:
+        stored_doc = searcher.document(id=doc_id)
+    return stored_doc.get("path") if stored_doc else None
+
+
 def resolve_requested_pdf(payload, action="read"):
     payload = payload or {}
     index_name = payload.get("index_name")
@@ -5504,19 +5514,66 @@ def resolve_requested_pdf(payload, action="read"):
 
     if index_name and doc_id:
         ensure_index_access(index_name, action=action)
-        ix, _ = create_or_open_index(index_name, check_access=False)
-        with ix.searcher() as searcher:
-            stored_doc = searcher.document(id=doc_id)
-        if not stored_doc:
+        index_folder = get_index_folder_path(index_name)
+        # Whoosh publishes each TOC by renaming a file in this directory.
+        # Include directory identity and timestamps to catch rebuilds as well.
+        with DOCUMENT_PATH_CACHE_LOCK:
+            try:
+                stat = os.stat(index_folder)
+                revision = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
+                stored_path = indexed_document_path(index_folder, revision, doc_id)
+            except (FileNotFoundError, index.EmptyIndexError):
+                stored_path = None
+        if not stored_path:
             raise FileNotFoundError("Document not found")
-        resolved_path = validate_pdf_path_for_index(stored_doc.get("path"), index_name)
-        return resolved_path, index_name, stored_doc
+        return validate_pdf_path_for_index(stored_path, index_name), index_name, doc_id
 
     if pdf_path:
         resolved_path, resolved_index_name = resolve_index_pdf_path(pdf_path)
         return resolved_path, resolved_index_name, None
 
     raise ValueError("Missing document path or id")
+
+
+def pdf_work_busy():
+    response = jsonify({"error": "PDF preview is busy. Please try again."})
+    response.status_code = 503
+    response.headers["Retry-After"] = "1"
+    response.cache_control.no_store = True
+    return response
+
+
+def limit_preview_requests(view):
+    @wraps(view)
+    def limited_view():
+        if not PREVIEW_REQUESTS.acquire(blocking=False):
+            return pdf_work_busy()
+        try:
+            response = app.make_response(view())
+            # Direct file responses bypass call_on_close. Wrap the iterable so
+            # the slot is held while streaming and released on disconnect.
+            response.response = ClosingIterator(response.response, PREVIEW_REQUESTS.release)
+            return response
+        except BaseException:
+            PREVIEW_REQUESTS.release()
+            raise
+    return limited_view
+
+
+def send_extracted_pdf(reader, page_numbers, attachment_name=None):
+    with tempfile.NamedTemporaryFile(dir=TMP_FOLDER, suffix=".pdf") as output:
+        writer = PdfWriter()
+        for page_number in page_numbers:
+            writer.add_page(reader.pages[page_number - 1])
+        writer.write(output)
+        output.flush()
+        # send_file opens its own descriptor. The temporary name is removed
+        # here and the descriptor is closed when the WSGI response ends.
+        return send_file(
+            output.name, mimetype="application/pdf",
+            as_attachment=attachment_name is not None,
+            download_name=attachment_name,
+        )
 
 
 @app.route('/download', methods=['POST'])
@@ -5539,31 +5596,21 @@ def download():
                 download_name=os.path.basename(pdf_path)
             )
 
-        # Extract and return the requested pages
-        reader = PdfReader(pdf_path)
-        writer = PdfWriter()
-        for page_num in pages:
-            if 0 <= page_num - 1 < len(reader.pages):  # Convert to zero-based index
-                writer.add_page(reader.pages[page_num - 1])
-            else:
-                logger.warning(f"Invalid page number {page_num} for PDF: {pdf_path}")
+        if not PDF_PAGE_WORK.acquire(blocking=False):
+            return pdf_work_busy()
+        try:
+            with open(pdf_path, "rb") as source:
+                reader = PdfReader(source)
+                count = len(reader.pages)
+                selected_pages = [page for page in pages if 1 <= page <= count]
+                return send_extracted_pdf(
+                    reader, selected_pages, f"selected_pages_{os.path.basename(pdf_path)}",
+                )
+        finally:
+            PDF_PAGE_WORK.release()
 
-        # Save the selected pages to a temporary file
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        with open(temp_file.name, 'wb') as f:
-            writer.write(f)
-
-        if not os.path.exists(temp_file.name):  # Validate temporary file existence
-            logger.error("Temporary file not created for download")
-            return jsonify({"error": "Failed to create temporary file for download"}), 500
-
-        logger.info(f"Returning selected pages {pages} of PDF: {pdf_path}")
-        return send_file(
-            temp_file.name,
-            as_attachment=True,
-            download_name=f"selected_pages_{os.path.basename(pdf_path)}"
-        )
-
+    except HTTPException:
+        raise
     except PermissionError as e:
         logger.warning(f"Forbidden download request: {e}")
         return jsonify({"error": str(e)}), 403
@@ -7852,6 +7899,7 @@ def compress_pdf(input_path, output_path, should_pause=None):
         logger.info(f"Cleaned up temporary directory: {temp_dir}")
 
 @app.route('/find-hit-page', methods=['GET'])
+@limit_preview_requests
 def find_hit_page():
     try:
         pdf_path, _, _ = resolve_requested_pdf(request.args)
@@ -7860,16 +7908,22 @@ def find_hit_page():
         if not query:
             return jsonify({"error": "Missing required parameters"}), 400
 
-        reader = PdfReader(pdf_path)
-        for i, page in enumerate(reader.pages):
-            text =""
-            try:
-                text = page.extract_text() or ""
-            except Exception as e:
-                logger.warning(f"Text extraction failed on page {i + 1} of {pdf_path}: {e}")
-                text = ""  # fallback to blank so indexing continues
-            if query.lower() in text.lower():
-                return jsonify({"page": i + 1})  # Return 1-based index
+        if not PDF_PAGE_WORK.acquire(blocking=False):
+            return pdf_work_busy()
+        try:
+            with open(pdf_path, "rb") as source:
+                reader = PdfReader(source)
+                needle = query.lower()
+                for i, page in enumerate(reader.pages):
+                    try:
+                        text = page.extract_text() or ""
+                    except Exception as e:
+                        logger.warning(f"Text extraction failed on page {i + 1} of {pdf_path}: {e}")
+                        continue
+                    if needle in text.lower():
+                        return jsonify({"page": i + 1})
+        finally:
+            PDF_PAGE_WORK.release()
 
         return jsonify({"page": -1})  # Not found
     except PermissionError as e:
@@ -7890,20 +7944,8 @@ def is_low_data_preview_enabled():
     return request.args.get("low_data", "").lower() in {"1", "true", "yes", "on"}
 
 
-def get_low_data_preview_cache_path(pdf_path, page_num):
+def get_low_data_preview_cache_path(pdf_path, page_num, cache_folder):
     stat = os.stat(pdf_path)
-    cache_folder = LOW_DATA_PREVIEW_CACHE_FOLDER
-    try:
-        index_name, metadata = find_document_metadata_by_path(pdf_path)
-        if index_name and metadata and metadata.get("source") == "cloud":
-            config = load_index_config(index_name)
-            if index_has_cloud_source(index_name, config):
-                configured_preview_folder = cloud_preview_folder(index_name, config)
-                if configured_preview_folder:
-                    cache_folder = configured_preview_folder
-    except Exception:
-        logger.debug("Falling back to local low-data preview cache for %s", pdf_path, exc_info=True)
-
     cache_key = hashlib.sha256(
         "|".join([
             os.path.realpath(pdf_path),
@@ -7917,11 +7959,7 @@ def get_low_data_preview_cache_path(pdf_path, page_num):
     return os.path.join(cache_folder, cache_key[:2], f"{cache_key}.jpg")
 
 
-def render_low_data_preview_page(pdf_path, page_num):
-    cache_path = get_low_data_preview_cache_path(pdf_path, page_num)
-    if os.path.exists(cache_path):
-        return cache_path
-
+def render_low_data_preview_page(pdf_path, page_num, cache_path, index_name, cloud_config):
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     images = convert_from_path(
         pdf_path,
@@ -7930,6 +7968,7 @@ def render_low_data_preview_page(pdf_path, page_num):
         last_page=page_num,
         fmt="jpeg",
         thread_count=1,
+        timeout=30,
     )
     if not images:
         raise ValueError("Unable to render preview page")
@@ -7951,10 +7990,11 @@ def render_low_data_preview_page(pdf_path, page_num):
             progressive=True,
         )
         os.replace(temp_path, cache_path)
-        try:
-            sync_low_data_preview_to_provider(pdf_path, cache_path)
-        except Exception:
-            logger.warning("Failed to sync low-data preview cache to cloud provider", exc_info=True)
+        if cloud_config:
+            try:
+                sync_low_data_preview_to_provider(index_name, cloud_config, cache_path)
+            except Exception:
+                logger.warning("Failed to sync low-data preview cache to cloud provider", exc_info=True)
     except Exception:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -7985,9 +8025,9 @@ def get_pdf_page_sizes(reader):
     return page_sizes
 
 
-def build_low_data_preview_html(rel_path, pdf_path, reader):
+def build_low_data_preview_html(document_params, pdf_path, reader):
     title = escape(os.path.basename(pdf_path))
-    rel_path_json = json.dumps(rel_path).replace("</", "<\\/")
+    params_json = json.dumps(document_params).replace("</", "<\\/")
     page_sizes = get_pdf_page_sizes(reader)
 
     page_markup = "\n".join(
@@ -8101,33 +8141,56 @@ def build_low_data_preview_html(rel_path, pdf_path, reader):
         {page_markup}
     </main>
     <script>
-        const pdfPath = {rel_path_json};
+        const documentParams = {params_json};
 
         function pageUrl(pageNumber) {{
             const params = new URLSearchParams({{
-                path: pdfPath,
+                ...documentParams,
                 page: String(pageNumber),
                 low_data: "1"
             }});
             return `${{window.location.pathname}}?${{params.toString()}}`;
         }}
 
-        function loadPage(pageElement) {{
-            if (pageElement.dataset.loaded === "1") return;
-            pageElement.dataset.loaded = "1";
+        // One image in flight per viewer. Other viewers can share the server.
+        const queue = [];
+        let loading = false;
 
-            const pageNumber = pageElement.dataset.page;
-            const image = pageElement.querySelector("img");
-            const status = pageElement.querySelector(".page-status");
-
-            image.loading = "lazy";
-            image.decoding = "async";
-            image.onload = () => pageElement.classList.add("loaded");
-            image.onerror = () => {{
-                pageElement.classList.add("failed");
+        async function loadNextPage() {{
+            if (loading || !queue.length) return;
+            loading = true;
+            const page = queue.shift();
+            const image = page.querySelector("img");
+            const status = page.querySelector(".page-status");
+            try {{
+                let response = await fetch(pageUrl(page.dataset.page));
+                for (let retry = 0; response.status === 503 && retry < 3; retry++) {{
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    response = await fetch(pageUrl(page.dataset.page));
+                }}
+                if (!response.ok) throw new Error("Preview unavailable");
+                const url = URL.createObjectURL(await response.blob());
+                image.src = url;
+                try {{
+                    await image.decode();
+                    page.classList.add("loaded");
+                }} finally {{
+                    URL.revokeObjectURL(url);
+                }}
+            }} catch (error) {{
+                page.classList.add("failed");
                 status.textContent = "Preview unavailable";
-            }};
-            image.src = pageUrl(pageNumber);
+            }} finally {{
+                loading = false;
+                loadNextPage();
+            }}
+        }}
+
+        function loadPage(page) {{
+            if (page.dataset.queued) return;
+            page.dataset.queued = "1";
+            queue.push(page);
+            loadNextPage();
         }}
 
         const pages = Array.from(document.querySelectorAll(".page"));
@@ -8153,54 +8216,71 @@ def build_low_data_preview_html(rel_path, pdf_path, reader):
 
 
 @app.route('/preview', methods=['GET'])
+@limit_preview_requests
 def preview():
-    """
-    Preview full or single page from a relative PDF path (e.g., ocr/converted/example_index/file.pdf).
-    """
+    """Preview an authorized full PDF or a single page."""
     try:
-        rel_path = request.args.get('path')
-        page_num = request.args.get('page', '1')
+        full_path, index_name, doc_id = resolve_requested_pdf(request.args)
+        page = request.args.get("page", "1")
+        low_data = is_low_data_preview_enabled()
 
-        full_path, _, _ = resolve_requested_pdf(request.args)
-        rel_path = rel_path or full_path
-        low_data_preview = is_low_data_preview_enabled()
-        logger.info(f"Preview request for: {full_path}, page: {page_num}, low_data: {low_data_preview}")
-
-        if page_num == 'all':
-            if low_data_preview:
-                reader = PdfReader(full_path)
-                return Response(
-                    build_low_data_preview_html(rel_path, full_path, reader),
-                    mimetype="text/html",
-                )
-            return send_file(full_path, as_attachment=False)
-
-        # Preview specific page
-        page_num = int(page_num)
-        reader = PdfReader(full_path)
-        if page_num < 1 or page_num > len(reader.pages):
-            return "Page not found", 404
-
-        if low_data_preview:
-            preview_path = render_low_data_preview_page(full_path, page_num)
-            response = send_file(
-                preview_path,
-                mimetype="image/jpeg",
-                as_attachment=False,
-                max_age=86400,
-            )
-            response.headers["Cache-Control"] = "private, max-age=86400"
-            response.headers["X-Low-Data-Preview"] = "1"
+        if page == "all" and not low_data:
+            response = send_file(full_path, as_attachment=False)
+            response.cache_control.private = True
             return response
 
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        writer = PdfWriter()
-        writer.add_page(reader.pages[page_num - 1])
-        with open(temp_file.name, 'wb') as f:
-            writer.write(f)
+        if not PDF_PAGE_WORK.acquire(blocking=False):
+            return pdf_work_busy()
+        try:
+            if page == "all":
+                document_params = (
+                    {"index_name": index_name, "id": doc_id}
+                    if doc_id else {"path": request.args["path"]}
+                )
+                with open(full_path, "rb") as source:
+                    return Response(
+                        build_low_data_preview_html(document_params, full_path, PdfReader(source)),
+                        mimetype="text/html",
+                    )
 
-        return send_file(temp_file.name, as_attachment=False)
+            page_num = int(page)
+            if low_data:
+                config = load_index_config(index_name)
+                cloud_config = None
+                cache_folder = LOW_DATA_PREVIEW_CACHE_FOLDER
+                if index_has_cloud_source(index_name, config) and path_within(
+                    config["cloud"]["root_path"], full_path,
+                ):
+                    cloud_config = config
+                    cache_folder = cloud_preview_folder(index_name, config)
 
+                preview_path = get_low_data_preview_cache_path(full_path, page_num, cache_folder)
+                if not os.path.exists(preview_path):
+                    if not LOW_DATA_RENDER_LOCK.acquire(blocking=False):
+                        return pdf_work_busy()
+                    try:
+                        if not os.path.exists(preview_path):
+                            with open(full_path, "rb") as source:
+                                if not 1 <= page_num <= len(PdfReader(source).pages):
+                                    return "Page not found", 404
+                            render_low_data_preview_page(full_path, page_num, preview_path, index_name, cloud_config)
+                    finally:
+                        LOW_DATA_RENDER_LOCK.release()
+                response = send_file(preview_path, mimetype="image/jpeg", max_age=86400)
+                response.headers["Cache-Control"] = "private, max-age=86400"
+                response.headers["X-Low-Data-Preview"] = "1"
+                return response
+
+            with open(full_path, "rb") as source:
+                reader = PdfReader(source)
+                if not 1 <= page_num <= len(reader.pages):
+                    return "Page not found", 404
+                return send_extracted_pdf(reader, [page_num])
+        finally:
+            PDF_PAGE_WORK.release()
+
+    except HTTPException:
+        raise
     except PermissionError as e:
         logger.warning(f"Forbidden preview request: {e}")
         return jsonify({"error": str(e)}), 403
