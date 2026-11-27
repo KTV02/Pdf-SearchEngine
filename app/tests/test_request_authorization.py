@@ -110,13 +110,13 @@ def test_malformed_proxy_configuration_fails_at_startup(backend_module, monkeypa
     "default via 192.0.2.20 dev eth0\ndefault via 198.51.100.20 dev eth1",
 ])
 def test_ambiguous_or_missing_docker_gateway_has_no_trust(monkeypatch, routes):
-    monkeypatch.setattr(request_identity, "RUNNING_IN_DOCKER", True)
+    monkeypatch.setattr(request_identity, "RUNNING_IN_CONTAINER", True)
     monkeypatch.setattr(request_identity.subprocess, "check_output", lambda *args, **kwargs: routes)
-    request_identity.get_docker_gateway_ip.cache_clear()
+    request_identity._gateway_for_minute.cache_clear()
     try:
         assert request_identity.get_docker_gateway_ip() is None
     finally:
-        request_identity.get_docker_gateway_ip.cache_clear()
+        request_identity._gateway_for_minute.cache_clear()
 
 
 def test_docker_gateway_detection_requires_a_container_and_one_route(monkeypatch):
@@ -125,15 +125,15 @@ def test_docker_gateway_detection_requires_a_container_and_one_route(monkeypatch
         return "default via 192.0.2.20 dev eth0\n"
 
     monkeypatch.setattr(request_identity.subprocess, "check_output", route_query)
-    request_identity.get_docker_gateway_ip.cache_clear()
+    request_identity._gateway_for_minute.cache_clear()
     try:
-        monkeypatch.setattr(request_identity, "RUNNING_IN_DOCKER", False)
+        monkeypatch.setattr(request_identity, "RUNNING_IN_CONTAINER", False)
         assert request_identity.get_docker_gateway_ip() is None
-        request_identity.get_docker_gateway_ip.cache_clear()
-        monkeypatch.setattr(request_identity, "RUNNING_IN_DOCKER", True)
+        request_identity._gateway_for_minute.cache_clear()
+        monkeypatch.setattr(request_identity, "RUNNING_IN_CONTAINER", True)
         assert request_identity.get_docker_gateway_ip() == request_identity.parse_peer("192.0.2.20")
     finally:
-        request_identity.get_docker_gateway_ip.cache_clear()
+        request_identity._gateway_for_minute.cache_clear()
 
 
 def test_local_mode_accepts_direct_loopback_and_gateway_access_only(backend_module, monkeypatch):
@@ -310,6 +310,32 @@ def test_only_the_isolated_test_credential_can_clean_the_test_index(backend_modu
     monkeypatch.setenv("PDFSEARCH_TEST_MODE", "true")
     assert client.post("/clean-test-index", headers=bypass, environ_overrides=OTHER_PEER).status_code == 200
     assert not index_dir.exists()
+
+
+def test_shared_login_requires_a_configured_service_hostname(backend_module):
+    client = backend_module.app.test_client()
+    assert client.get("/auth/me", headers={**ADMIN, "Host": "alternate.example.com"}).status_code == 403
+    assert client.get("/auth/me", headers={**ADMIN, "Host": "localhost:5050"}).status_code == 200
+
+
+def test_unicode_and_ascii_logins_remain_distinct():
+    assert request_identity.normalize_login("Kate@example.com") != request_identity.normalize_login("Kate@example.com")
+
+
+def test_failed_gateway_lookup_recovers_at_next_refresh(monkeypatch):
+    monkeypatch.setattr(request_identity, "RUNNING_IN_CONTAINER", True)
+    clock = [0]
+    monkeypatch.setattr(request_identity.time, "monotonic", lambda: clock[0])
+    responses = iter(["", "default via 192.0.2.20 dev eth0"])
+    monkeypatch.setattr(request_identity.subprocess, "check_output", lambda *a, **kw: next(responses))
+    request_identity._gateway_for_minute.cache_clear()
+    try:
+        assert request_identity.get_docker_gateway_ip() is None
+        assert request_identity.get_docker_gateway_ip() is None
+        clock[0] = 60
+        assert request_identity.get_docker_gateway_ip() == request_identity.parse_peer("192.0.2.20")
+    finally:
+        request_identity._gateway_for_minute.cache_clear()
 
 
 def test_unconfigured_mail_import_is_reported_before_starting_a_job(backend_module, monkeypatch, mocker):

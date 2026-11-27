@@ -3,12 +3,16 @@
 from email.header import decode_header
 from functools import lru_cache
 import ipaddress
+import logging
 import os
 import re
 import subprocess
+import time
+from urllib.parse import urlsplit
 
 
-RUNNING_IN_DOCKER = os.path.isfile("/.dockerenv")
+RUNNING_IN_CONTAINER = os.path.isfile("/.dockerenv") or os.path.isfile("/run/.containerenv")
+ASCII_LOWERCASE = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 LOGIN_HEADER = "Tailscale-User-Login"
 LOCAL_HOST = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?", re.ASCII | re.IGNORECASE)
 LOGIN_ATOM = r"[\w!#$%&'*+/=?^`{|}~-]+"
@@ -30,7 +34,7 @@ def normalize_login(value):
             login = "".join(part.decode("utf-8") for part, _ in decode_header(login))
         except UnicodeDecodeError:
             return ""
-    return login.lower() if LOGIN_NAME.fullmatch(login) else ""
+    return login.translate(ASCII_LOWERCASE) if LOGIN_NAME.fullmatch(login) else ""
 
 
 def parse_peer(value):
@@ -50,6 +54,9 @@ def configure_request_identity(app):
         raise ValueError("LOCAL_SINGLE_USER_MODE must be true or false")
     app.config["LOCAL_SINGLE_USER_MODE"] = mode == "true"
 
+    app.config["PDFSEARCH_BROWSER_HOSTS"] = frozenset(
+        urlsplit(origin).hostname for origin in app.config["PDFSEARCH_ALLOWED_ORIGINS"]
+    )
     proxy_ip = os.environ.get("PDFSEARCH_TRUSTED_PROXY_IP", "").strip()
     trusted_proxy = parse_peer(proxy_ip)
     if proxy_ip and trusted_proxy is None:
@@ -57,21 +64,30 @@ def configure_request_identity(app):
     app.config["PDFSEARCH_TRUSTED_PROXY_IP"] = trusted_proxy
 
 
-@lru_cache(maxsize=1)
 def get_docker_gateway_ip():
-    if not RUNNING_IN_DOCKER:
+    if not RUNNING_IN_CONTAINER:
         return None
+    return _gateway_for_minute(int(time.monotonic() // 60))
+
+
+@lru_cache(maxsize=1)
+def _gateway_for_minute(_minute):
+    # A failed lookup denies trust until the next refresh. Cache misses as well
+    # as successes so requests cannot repeatedly spawn the route command.
     try:
         routes = subprocess.check_output(
             ["ip", "-4", "route", "show", "default"], text=True,
             stderr=subprocess.DEVNULL, timeout=2,
         ).splitlines()
     except (OSError, subprocess.SubprocessError):
-        return None
+        routes = []
     if len(routes) == 1:
         route = routes[0].split()
         if len(route) >= 3 and route[:2] == ["default", "via"]:
-            return parse_peer(route[2])
+            gateway = parse_peer(route[2])
+            if gateway is not None:
+                return gateway
+    logging.getLogger(__name__).warning("No unambiguous Docker gateway, retrying within a minute")
     return None
 
 
@@ -97,6 +113,13 @@ def browser_identity(request, config):
     logins = request.headers.getlist(LOGIN_HEADER)
     login = normalize_login(logins[0]) if len(logins) == 1 else ""
     if not login:
+        return None
+    try:
+        host = urlsplit("//" + request.host)
+        if (host.hostname not in config["PDFSEARCH_BROWSER_HOSTS"] or host.username is not None
+                or host.path or host.query or host.fragment):
+            return None
+    except ValueError:
         return None
     trusted_proxy = config["PDFSEARCH_TRUSTED_PROXY_IP"]
     if (peer == trusted_proxy if trusted_proxy is not None else is_local_peer(peer)):

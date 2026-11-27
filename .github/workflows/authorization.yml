@@ -27,5 +27,6 @@ jobs:
         run: |
           docker run --rm --network none pdfsearch-tests pytest -q \
             /app/tests/test_request_authorization.py \
+            /app/tests/test_backend_units.py \
             /app/tests/test_email_processor_api.py \
             /app/tests/test_email_processor_units.py

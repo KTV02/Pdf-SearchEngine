@@ -17,6 +17,7 @@ RUN python -m pip install --no-cache-dir --no-build-isolation --only-binary=lxml
 RUN mkdir -p ocr/converted/uploads index_folder tmp
 
 # Expose Flask port
+ENV PDFSEARCH_BIND_ADDRESS=0.0.0.0
 EXPOSE 5050
 
 # Run the app

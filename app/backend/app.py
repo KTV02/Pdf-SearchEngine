@@ -43,7 +43,6 @@ from collections import Counter
 from task_queue import TaskQueueManager
 from job_coordinator import NodeRedJobCoordinator
 from request_identity import (
-    RUNNING_IN_DOCKER,
     browser_identity,
     configure_request_identity,
     has_proxy_headers,
@@ -3838,6 +3837,10 @@ def save_access_config(config):
     return normalized
 
 
+class PolicyUpdateBusy(Exception):
+    """Another request is changing the shared access policy."""
+
+
 def resolve_request_principal():
     if is_test_bypass_request():
         kind, login = "test", "test-bypass"
@@ -3855,7 +3858,8 @@ def resolve_request_principal():
 
     if (request.endpoint, request.method) in {("manage_access_config", "PUT"), ("create_admin_index", "POST")}:
         # Serialize permission changes from the snapshot through the write.
-        access_config_lock.acquire()
+        if not access_config_lock.acquire(timeout=1):
+            raise PolicyUpdateBusy
         request.environ["pdfsearch.access_config_locked"] = True
 
     config = load_access_config()
@@ -3973,6 +3977,10 @@ def authorize_request():
 
     try:
         principal = get_current_principal()
+    except PolicyUpdateBusy:
+        response = authorization_error("Another access update is in progress, please retry", 503)
+        response.headers["Retry-After"] = "1"
+        return response
     except (OSError, ValueError):
         logger.error("Unable to load access configuration", exc_info=True)
         return authorization_error("Access configuration is unavailable", 503)
@@ -9422,4 +9430,4 @@ warn_about_insecure_test_settings()
 
 if __name__ == "__main__":
     # Compose publishes the container port on the host's loopback only.
-    app.run(host="0.0.0.0" if RUNNING_IN_DOCKER else "127.0.0.1", port=5050)
+    app.run(host=os.environ.get("PDFSEARCH_BIND_ADDRESS", "127.0.0.1"), port=5050)
