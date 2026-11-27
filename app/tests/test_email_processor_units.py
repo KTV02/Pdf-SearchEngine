@@ -12,7 +12,7 @@ def test_upload_file_to_index_accepts_queued_backend_response(email_processor_mo
         status_code = 202
         text = "queued"
 
-    def fake_post(url, headers=None, files=None, data=None):
+    def fake_post(url, headers=None, files=None, data=None, timeout=None):
         captured["url"] = url
         captured["headers"] = headers
         captured["data"] = data
@@ -81,3 +81,36 @@ def test_process_full_inbox_uses_exclusive_year_end(email_processor_module, monk
     assert len(search_calls) == 21
     assert search_calls[0] == ["SINCE", f"01-Jan-{current_year - 20}", "BEFORE", f"01-Jan-{current_year - 19}"]
     assert search_calls[-1] == ["SINCE", f"01-Jan-{current_year}", "BEFORE", f"01-Jan-{current_year + 1}"]
+
+
+def test_monitor_retries_the_same_uid_before_advancing(email_processor_module, monkeypatch, tmp_path):
+    import contextlib
+    module = email_processor_module
+    handled = []
+    class Mailbox:
+        def select_folder(self, name):
+            assert name == "INBOX"
+
+        def search(self, criteria):
+            if criteria == ["ALL"]:
+                return [6, 7]
+            assert criteria == ["UID", "7:*"]
+            return [7, 8]
+
+    class StopAfterBatch(threading.Event):
+        def wait(self, seconds):
+            if seconds == module.PAUSE_DELAY:
+                self.set()
+            else:
+                assert module.load_last_uid("reader@example.com") == 6
+            return self.is_set()
+
+    def handle(client, uid, config, event):
+        handled.append(uid)
+        return len(handled) > 1
+
+    monkeypatch.setattr(module, "connect", lambda config: contextlib.nullcontext(Mailbox()))
+    monkeypatch.setattr(module, "process_message", handle)
+    module.monitor_inbox({"email": "reader@example.com"}, StopAfterBatch())
+    assert handled == [7, 7, 8]
+    assert module.load_last_uid("reader@example.com") == 8

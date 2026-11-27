@@ -3667,7 +3667,7 @@ def warn_about_insecure_test_settings():
         logger.warning("PDFSEARCH_TEST_MODE is enabled: authorization bypass is active for integration tests. "
                        "Never enable it for a real installation.")
     if MAIL_TOKEN in PUBLIC_MAIL_TOKENS:
-        logger.info("Mail ingestion is disabled until MAIL_TOKEN is set to a private value.")
+        logger.warning("Mail ingestion is disabled until MAIL_TOKEN is set to a private value.")
 
 
 def log_request_client_activity(principal):
@@ -7524,6 +7524,9 @@ def create_email_task():
             return jsonify({"error": "Index name is required"}), 400
         ensure_index_access(index_name, action="write")
         ensure_index_accepts_uploads(index_name)
+
+        if MAIL_TOKEN in PUBLIC_MAIL_TOKENS:
+            return jsonify({"error": "Set a private MAIL_TOKEN on both services to enable mail import"}), 503
 
         res = requests.post(f"{MAIL_PROCESSOR_URL}/email-task", json=data)
         return jsonify(res.json()), res.status_code

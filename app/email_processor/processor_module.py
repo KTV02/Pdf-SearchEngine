@@ -1,5 +1,5 @@
 import os
-import time
+import tempfile
 import json
 import logging
 import datetime
@@ -37,7 +37,6 @@ headers = {
 
 MAX_ATTACHMENT_SIZE_MB = 15
 RETRY_DELAY = 10
-UID_THRESHOLD = 1000
 PAUSE_DELAY = 60
 TASKS_FILE = os.path.join(STATUS_DIR, "tasks.json")
 
@@ -65,15 +64,22 @@ def is_attachment_too_large(payload):
     return len(payload) / (1024 * 1024) > MAX_ATTACHMENT_SIZE_MB
 
 def save_last_uid(email, uid):
-    with open(os.path.join(STATUS_DIR, f"{email}_uid.json"), 'w') as f:
-        json.dump({"last_uid": uid}, f)
+    path = os.path.join(STATUS_DIR, f"{email}_uid.json")
+    fd, pending = tempfile.mkstemp(dir=STATUS_DIR, prefix=".uid-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"last_uid": uid}, f)
+        os.replace(pending, path)
+    finally:
+        if os.path.exists(pending):
+            os.unlink(pending)
 
 def load_last_uid(email):
     path = os.path.join(STATUS_DIR, f"{email}_uid.json")
     if os.path.exists(path):
         with open(path, 'r') as f:
-            return json.load(f).get("last_uid", 0)
-    return 0
+            return json.load(f)["last_uid"]
+    return None
 
 def connect(config):
     from imapclient import IMAPClient
@@ -86,7 +92,8 @@ def connect(config):
 def upload_file_to_index(path, index_name):
     try:
         with open(path, 'rb') as f:
-            res = requests.post(ADD_DOCUMENT_ENDPOINT,headers=headers, files={"file": f}, data={"index_name": index_name})
+            res = requests.post(ADD_DOCUMENT_ENDPOINT, headers=headers, files={"file": f},
+                                data={"index_name": index_name}, timeout=(5, 120))
         logger.info(f"📤 Upload response: {res.status_code} {res.text}")
         return res.status_code in [200, 202, 409]
     except Exception as e:
@@ -95,7 +102,7 @@ def upload_file_to_index(path, index_name):
 
 def process_message(client, uid, config, stop_event):
     if stop_event.is_set():
-        return
+        return False
 
     logger.info(f"📧 Fetching message UID {uid}")
     try:
@@ -120,10 +127,14 @@ def process_message(client, uid, config, stop_event):
                 with open(path, 'wb') as f:
                     f.write(payload)
 
-                if upload_file_to_index(path, config["index_name"]):
-                    logger.info(f"✅ Uploaded {path}")
+                if not upload_file_to_index(path, config["index_name"]):
+                    logger.warning("Attachment was not accepted for UID %s", uid)
+                    return False
+                logger.info(f"✅ Uploaded {path}")
+        return True
     except Exception as e:
         logger.error(f"💥 Failed to process UID {uid}: {e}")
+        return False
 
 # ---------------- Task Control ----------------
 
@@ -219,9 +230,13 @@ def stop_task(task_id, index_name=None):
         meta = task_configs.get(task_id)
         if not meta:
             raise LookupError("Email task not found for this index")
-        with open(meta["config_path"], encoding="utf-8") as f:
-            if json.load(f).get("index_name") != index_name:
-                raise LookupError("Email task not found for this index")
+        try:
+            with open(meta["config_path"], encoding="utf-8") as f:
+                stored_index = json.load(f)["index_name"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise LookupError("Email task not found for this index") from exc
+        if stored_index != index_name:
+            raise LookupError("Email task not found for this index")
 
     event = cancel_flags.get(task_id)
     if event:
@@ -295,30 +310,26 @@ def monitor_inbox(config, stop_event):
         try:
             with connect(config) as client:
                 client.select_folder("INBOX")
-                uids = client.search(["ALL"])
-                if not uids:
-                    logger.info("📭 No emails found.")
-                    time.sleep(RETRY_DELAY)
-                    continue
+                if last_uid is None:
+                    # A new monitor starts with the latest existing message. Persist
+                    # the starting point so an upload failure cannot move it forward.
+                    uids = client.search(["ALL"])
+                    last_uid = max(uids) - 1 if uids else 0
+                    save_last_uid(email, last_uid)
+                else:
+                    uids = client.search(["UID", f"{last_uid + 1}:*"])
 
-                newest = max(uids)
-                if last_uid == 0 or (newest - last_uid > UID_THRESHOLD):
-                    logger.warning("⚠️ UID offset too large. Processing only newest email.")
-                    process_message(client, newest, config, stop_event)
-                    save_last_uid(email, newest)
-                    time.sleep(RETRY_DELAY)
-                    continue
-
-                for uid in sorted(uids):
-                    if uid > last_uid:
-                        process_message(client, uid, config, stop_event)
-                        last_uid = uid
-                        save_last_uid(email, uid)
-
-                time.sleep(PAUSE_DELAY)
+                for uid in sorted(uid for uid in uids if uid > last_uid):
+                    if stop_event.is_set():
+                        return
+                    if not process_message(client, uid, config, stop_event):
+                        raise RuntimeError(f"Mail import paused at UID {uid}")
+                    save_last_uid(email, uid)
+                    last_uid = uid
+            stop_event.wait(PAUSE_DELAY)
         except Exception as e:
             logger.warning(f"🔄 Error during monitoring: {e}")
-            time.sleep(RETRY_DELAY)
+            stop_event.wait(RETRY_DELAY)
 
 
 # ✅ Automatically reload tasks on startup

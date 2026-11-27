@@ -310,3 +310,13 @@ def test_only_the_isolated_test_credential_can_clean_the_test_index(backend_modu
     monkeypatch.setenv("PDFSEARCH_TEST_MODE", "true")
     assert client.post("/clean-test-index", headers=bypass, environ_overrides=OTHER_PEER).status_code == 200
     assert not index_dir.exists()
+
+
+def test_unconfigured_mail_import_is_reported_before_starting_a_job(backend_module, monkeypatch, mocker):
+    monkeypatch.setattr(backend_module, "MAIL_TOKEN", "")
+    start = mocker.patch.object(backend_module.requests, "post")
+    response = backend_module.app.test_client().post(
+        "/email-task", headers=WRITER, json={"mode": "monitor", "index_name": "test_index"})
+    assert response.status_code == 503
+    assert "MAIL_TOKEN" in response.json["error"]
+    start.assert_not_called()
