@@ -32,8 +32,9 @@ def backend_module(tmp_path, monkeypatch):
     monkeypatch.setenv("CLOUD_CONNECTIONS_PATH", str(tmp_path / "index_folder" / "cloud_connections.json"))
     monkeypatch.setenv("CLOUD_PROVIDER_CONFIG_PATH", str(tmp_path / "index_folder" / "cloud_provider_config.json"))
     monkeypatch.setenv("ROLE_CONFIG_PATH", str(tmp_path / "roles.json"))
-    monkeypatch.setenv("ROLE_INDEX_CONFIG_PATH", str(tmp_path / "role_indices.json"))
     monkeypatch.delenv("LOCAL_SINGLE_USER_MODE", raising=False)
+    monkeypatch.delenv("PDFSEARCH_TRUSTED_PROXY_IP", raising=False)
+    monkeypatch.delenv("PDFSEARCH_ALLOWED_ORIGINS", raising=False)
     monkeypatch.setenv("ACCESS_CONFIG_PATH", str(tmp_path / "access_config.json"))
     monkeypatch.setenv("STORAGE_CONFIG_PATH", str(tmp_path / "index_folder" / "storage_config.json"))
     monkeypatch.setenv("BACKUP_TARGET_FOLDER", str(tmp_path / "backups"))
@@ -72,8 +73,6 @@ def backend_module(tmp_path, monkeypatch):
     sys.modules.pop("app", None)
     module = importlib.import_module("app")
     module.app.config.update(TESTING=True)
-    module.real_get_docker_gateway_ip = module.get_docker_gateway_ip
-    monkeypatch.setattr(module, "get_docker_gateway_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(module, "send_alert_email", lambda *args, **kwargs: None)
     yield module
     sys.modules.pop("app", None)

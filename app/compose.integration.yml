@@ -19,7 +19,6 @@ services:
       EMAIL_CONFIGS: /app/email_configs
       ACCESS_CONFIG_PATH: /app/config/access_config.json
       ROLE_CONFIG_PATH: /app/config/roles.json
-      ROLE_INDEX_CONFIG_PATH: /app/config/role_indices.json
       STORAGE_CONFIG_PATH: /app/index_folder/storage_config.json
       CLOUD_CONNECTIONS_PATH: /app/index_folder/cloud_connections.json
       CLOUD_PROVIDER_CONFIG_PATH: /app/index_folder/cloud_provider_config.json

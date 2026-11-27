@@ -13,7 +13,7 @@ services:
     - ${CONFIG_HOST_PATH:-./data/config}:/app/config
     - ${EMAIL_CONFIG_HOST_PATH:-./data/email_configs}:/app/email_configs
     environment:
-    - MAIL_TOKEN=${MAIL_TOKEN:-local-mail-token}
+    - MAIL_TOKEN=${MAIL_TOKEN:-}
     - PDF_FOLDER=${PDF_FOLDER:-/app/ocr/converted}
     - DELETED_FOLDER=${DELETED_FOLDER:-/app/ocr/deleted}
     - INDEX_FOLDER=${INDEX_FOLDER:-/app/index_folder}
@@ -22,8 +22,8 @@ services:
     - EMAIL_CONFIGS=${EMAIL_CONFIGS:-/app/email_configs}
     - ACCESS_CONFIG_PATH=${ACCESS_CONFIG_PATH:-/app/config/access_config.json}
     - ROLE_CONFIG_PATH=${ROLE_CONFIG_PATH:-/app/config/roles.json}
-    - ROLE_INDEX_CONFIG_PATH=${ROLE_INDEX_CONFIG_PATH:-/app/config/role_indices.json}
-    - LOCAL_SINGLE_USER_MODE=${LOCAL_SINGLE_USER_MODE:-true}
+    - LOCAL_SINGLE_USER_MODE=${LOCAL_SINGLE_USER_MODE-true}
+    - PDFSEARCH_TRUSTED_PROXY_IP=${PDFSEARCH_TRUSTED_PROXY_IP:-}
     - PDFSEARCH_ALLOWED_ORIGINS=${PDFSEARCH_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1,http://localhost:5050,http://127.0.0.1:5050}
     - NODERED_COORDINATOR_TOKEN_FILE=${NODERED_COORDINATOR_TOKEN_FILE:-}
     - STORAGE_CONFIG_PATH=${STORAGE_CONFIG_PATH:-/app/index_folder/storage_config.json}
@@ -131,7 +131,7 @@ services:
     - ${MAIL_STATE_HOST_PATH:-./data/mail_state}:/app/email_processor/processor_state
     environment:
     - BACKEND_API=http://backend:5050
-    - MAIL_TOKEN=${MAIL_TOKEN:-local-mail-token}
+    - MAIL_TOKEN=${MAIL_TOKEN:-}
     depends_on:
       backend:
         condition: service_healthy

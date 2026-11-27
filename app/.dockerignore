@@ -10,6 +10,7 @@ tests/**
 !backend/browser_security.py
 !backend/convert_folder.py
 !backend/job_coordinator.py
+!backend/request_identity.py
 !backend/task_queue.py
 !backend/requirements.txt
 !email_processor/processor_api.py
@@ -25,6 +26,7 @@ tests/**
 !tests/test_email_processor_units.py
 !tests/test_infra_config.py
 !tests/test_integration_backend_api.py
+!tests/test_request_authorization.py
 !tests/requirements.txt
 !docker-compose.yml
 !compose.integration.yml

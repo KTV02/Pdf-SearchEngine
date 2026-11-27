@@ -582,7 +582,7 @@ def test_google_drive_browser_login_callback_saves_connection(backend_module, mo
     start_response = client.post(
         "/cloud-connections/start",
         json={"provider": "google_drive", "display_name": "Google", "index_name": "test_index"},
-        headers=BYPASS_HEADERS,
+        headers={"Tailscale-User-Login": "writer@example.com"},
     )
     assert start_response.status_code == 202
     session = start_response.json["connection"]
@@ -614,16 +614,19 @@ def test_google_drive_browser_login_callback_saves_connection(backend_module, mo
     callback_response = client.get(
         "/cloud-connections/callback/google_drive",
         query_string={"state": backend_module.cloud_auth_sessions[session["id"]]["state"], "code": "auth-code"},
+        headers={"Tailscale-User-Login": "writer@example.com"},
     )
 
     assert callback_response.status_code == 200
     saved_connection = backend_module.get_cloud_connection(session["id"])
     assert saved_connection["provider"] == "google_drive"
+    assert saved_connection["owner"]["login"] == "writer@example.com"
     assert saved_connection["token"]["refresh_token"] == "google-refresh-token"
     assert saved_connection["account"]["mail"] == "google@example.com"
 
 
 def test_dropbox_browser_login_callback_saves_connection(backend_module, monkeypatch):
+    backend_module.app.config["LOCAL_SINGLE_USER_MODE"] = True
     client = backend_module.app.test_client()
     response = client.put(
         "/cloud-provider-settings",
@@ -643,7 +646,6 @@ def test_dropbox_browser_login_callback_saves_connection(backend_module, monkeyp
     start_response = client.post(
         "/cloud-connections/start",
         json={"provider": "dropbox", "display_name": "Dropbox", "index_name": "test_index"},
-        headers=BYPASS_HEADERS,
     )
     assert start_response.status_code == 202
     session = start_response.json["connection"]
@@ -677,6 +679,7 @@ def test_dropbox_browser_login_callback_saves_connection(backend_module, monkeyp
     assert callback_response.status_code == 200
     saved_connection = backend_module.get_cloud_connection(session["id"])
     assert saved_connection["provider"] == "dropbox"
+    assert saved_connection["owner"]["type"] == "local"
     assert saved_connection["token"]["refresh_token"] == "dropbox-refresh-token"
     assert saved_connection["account"]["mail"] == "dropbox@example.com"
 
@@ -986,6 +989,22 @@ def test_download_returns_authorized_pdf(backend_module):
 
     assert response.status_code == 200
     assert response.mimetype == "application/pdf"
+
+
+def test_registered_reader_can_search_and_download_only_a_granted_index(backend_module):
+    client = backend_module.app.test_client()
+    reader = {"Tailscale-User-Login": "reader@example.com"}
+    for name, expected_status in [("test_index", 200), ("second_index", 403)]:
+        pdf_path = Path(backend_module.PDF_FOLDER) / name / "doc.pdf"
+        write_blank_pdf(pdf_path)
+        ix, _ = backend_module.create_or_open_index(name)
+        with ix.writer() as writer:
+            writer.add_document(id="doc", title="Synthetic", path=str(pdf_path), content="Synthetic OCR")
+        search = client.get("/search", query_string={"q": "synthetic", "index_name": name}, headers=reader)
+        assert search.status_code == expected_status
+        download = client.post("/download", json={"index_name": name, "id": "doc"}, headers=reader)
+        assert download.status_code == expected_status
+        download.close()
 
 
 def test_indexed_preview_rechecks_access_and_reuses_path_across_ranges(backend_module, monkeypatch):
@@ -2250,31 +2269,15 @@ def test_zip_upload_pauses_after_current_document_when_coordinator_locks(backend
     assert state["paused_tasks"] == {}
 
 
-def test_local_single_user_mode_grants_only_direct_host_access(backend_module, monkeypatch):
-    monkeypatch.setenv('LOCAL_SINGLE_USER_MODE', 'true')
-    app = backend_module.app
-    with app.test_request_context('/auth/me', environ_base={'REMOTE_ADDR': '127.0.0.1'}):
-        principal = backend_module.get_current_principal()
-        assert principal['type'] == 'local'
-        assert principal['is_admin']
-    with app.test_request_context('/auth/me', environ_base={'REMOTE_ADDR': '203.0.113.2'}):
-        assert not backend_module.get_current_principal()['is_admin']
-    with app.test_request_context('/auth/me', environ_base={'REMOTE_ADDR': '127.0.0.1'},
-                                  headers={'X-Forwarded-For': '198.51.100.8'}):
-        assert not backend_module.get_current_principal()['is_admin']
-
-
-def test_empty_roles_and_private_legacy_mappings(backend_module, tmp_path, monkeypatch):
+def test_admin_can_inspect_archived_roles(backend_module, tmp_path, monkeypatch):
     roles_path = tmp_path / 'missing' / 'roles.json'
-    mappings_path = tmp_path / 'role_indices.json'
     monkeypatch.setattr(backend_module, 'ROLE_CONFIG_PATH', str(roles_path))
-    monkeypatch.setattr(backend_module, 'ROLE_INDEX_CONFIG_PATH', str(mappings_path))
+    client = backend_module.app.test_client()
     assert backend_module.load_roles() == {}
-    assert backend_module.get_role_to_indices() == {}
     backend_module.save_roles({'198.51.100.1': 'reader'})
-    assert backend_module.load_roles() == {'198.51.100.1': 'reader'}
-    mappings_path.write_text('{"reader": ["documents"]}')
-    assert backend_module.get_role_to_indices() == {'reader': ['documents']}
+    response = client.get('/roles', headers={'Tailscale-User-Login': 'admin@example.com'})
+    assert response.status_code == 200
+    assert response.json == {'198.51.100.1': 'reader'}
 
 
 def test_test_bypass_requires_explicit_test_mode(backend_module, monkeypatch):
@@ -2302,13 +2305,3 @@ def test_mail_token_comparison_rejects_missing_and_wrong_values(backend_module):
     assert backend_module.mail_token_matches("wrong") is False
     assert backend_module.mail_token_matches(None) is False
     assert backend_module.mail_token_matches("") is False
-
-
-def test_missing_default_route_means_no_trusted_host_gateway(backend_module, monkeypatch):
-    def no_route(*args, **kwargs):
-        raise backend_module.subprocess.CalledProcessError(1, "ip route")
-
-    monkeypatch.setattr(backend_module, "docker_gateway_ip_cache", None)
-    monkeypatch.setattr(backend_module.subprocess, "check_output", no_route)
-    assert backend_module.real_get_docker_gateway_ip() is None
-    assert backend_module.docker_gateway_ip_cache is None

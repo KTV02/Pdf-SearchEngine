@@ -4,5 +4,6 @@
 !browser_security.py
 !convert_folder.py
 !job_coordinator.py
+!request_identity.py
 !task_queue.py
 !requirements.security.lock

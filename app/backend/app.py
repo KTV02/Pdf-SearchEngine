@@ -1,6 +1,5 @@
 # pdfsearcheninge core that hosts backend and frontend for digitalizing pdfs from different sources
 from flask import Flask, request, jsonify, send_file, Response, send_from_directory, stream_with_context,g
-from flask_cors import CORS
 from whoosh import index
 from whoosh.fields import Schema, TEXT, ID
 from whoosh.query import Every
@@ -37,15 +36,20 @@ import base64
 from urllib.parse import quote, unquote, urlencode
 from pathlib import Path, PurePosixPath
 from markupsafe import escape
-import ipaddress
 import requests
 import threading
 import math
 from collections import Counter
 from task_queue import TaskQueueManager
 from job_coordinator import NodeRedJobCoordinator
+from request_identity import (
+    RUNNING_IN_DOCKER,
+    browser_identity,
+    configure_request_identity,
+    has_proxy_headers,
+    normalize_login,
+)
 from flask import has_request_context
-from flask import abort
 import clamd
 import time
 
@@ -63,6 +67,7 @@ from email.mime.multipart import MIMEMultipart
 app = Flask(__name__, static_folder="frontend")
 from browser_security import install_browser_security
 install_browser_security(app)
+configure_request_identity(app)
 
 
 
@@ -118,11 +123,10 @@ MAIL_PROCESSOR_URL = os.environ.get("MAIL_PROCESSOR_URL", "http://mail-processor
 
 
 
-# access controll
-# Define roles and IP mappings
+# Keep the legacy roles file available to administrators and backups.
 ROLE_CONFIG_PATH = os.environ.get("ROLE_CONFIG_PATH", "/app/backend/roles.json")
 ACCESS_CONFIG_PATH = os.environ.get("ACCESS_CONFIG_PATH", "/app/backend/access_config.json")
-ROLE_INDEX_CONFIG_PATH = os.environ.get("ROLE_INDEX_CONFIG_PATH", "/app/config/role_indices.json")
+access_config_lock = threading.Lock()
 
 #---------------------------------------------------filepathsDONE
 
@@ -196,12 +200,12 @@ task_queue = TaskQueueManager()
 task_status = {}  # task_id → {status, message, result}
 request_client_lock = threading.Lock()
 request_clients = {}
-docker_gateway_ip_cache = None
 
 
 # setupdone-------------------------------------------------------------------------------------
 
-MAIL_TOKEN = os.environ.get("MAIL_TOKEN", "default_mail_token")  # Set securely in Docker
+MAIL_TOKEN = os.environ.get("MAIL_TOKEN", "")
+PUBLIC_MAIL_TOKENS = {"", "default_mail_token", "local-mail-token", "replace-with-a-private-random-value"}
 
 
 def get_env_int(name, default):
@@ -309,7 +313,7 @@ os.makedirs(MANAGED_CLOUD_FOLDER, exist_ok=True)
 
 
 def validate_index_name(index_name):
-    if not index_name or not re.fullmatch(r"[A-Za-z0-9_-]+", index_name):
+    if not isinstance(index_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", index_name):
         raise ValueError("Invalid index name")
     return index_name
 
@@ -696,15 +700,18 @@ def current_principal_owner():
 
 
 def owner_matches_principal(owner, principal=None):
-    owner = owner if isinstance(owner, dict) else {}
     principal = principal or get_current_principal()
-    owner_id = str(owner.get("id") or "").strip()
-    owner_login = normalize_login(owner.get("login"))
-    if owner_id and owner_id == str(principal.get("id") or "").strip():
-        return True
-    if owner_login and owner_login == normalize_login(principal.get("login")):
-        return True
-    return False
+    if not principal or not isinstance(owner, dict):
+        return False
+    owner_type = owner.get("type")
+    if principal["type"] == "tailscale" and owner_type in ("tailscale", "", None):
+        # Older connections may only have a login or only a login-valued ID.
+        owner_login = normalize_login(owner.get("login"))
+        owner_id = normalize_login(owner.get("id"))
+        if owner_login and owner_id and owner_login != owner_id:
+            return False
+        return (owner_login or owner_id) == principal["login"]
+    return owner_type == principal["type"] and owner.get("id") == principal["id"]
 
 
 def connection_ids_used_by_indices(index_names):
@@ -767,14 +774,13 @@ def ensure_can_start_cloud_connection(index_name=None):
     raise PermissionError("Write access to an index is required to connect cloud accounts")
 
 
-def ensure_cloud_connection_access(connection_id):
-    if not has_request_context() or is_test_bypass_request():
+def ensure_cloud_connection_access(connection_id, connection):
+    if not has_request_context():
         return True
     principal = get_current_principal()
     if principal.get("is_admin"):
         return True
 
-    connection = get_cloud_connection(connection_id)
     if connection and owner_matches_principal(connection.get("owner"), principal):
         return True
 
@@ -785,7 +791,7 @@ def ensure_cloud_connection_access(connection_id):
 
 
 def ensure_cloud_connection_usable_for_index(index_name, connection_id):
-    if not has_request_context() or is_test_bypass_request():
+    if not has_request_context():
         return True
     principal = get_current_principal()
     if principal.get("is_admin"):
@@ -803,7 +809,7 @@ def ensure_cloud_connection_usable_for_index(index_name, connection_id):
 
 
 def ensure_cloud_provider_usable_for_principal(provider):
-    if not has_request_context() or is_test_bypass_request():
+    if not has_request_context():
         return True
     if get_current_principal().get("is_admin"):
         return True
@@ -1406,6 +1412,8 @@ def find_cloud_auth_session_by_state(provider, state):
     with cloud_auth_sessions_lock:
         for session in cloud_auth_sessions.values():
             if session.get("provider") == provider and session.get("state") == state:
+                if not owner_matches_principal(session.get("owner")):
+                    raise PermissionError("Access denied to this cloud login")
                 return dict(session)
     return None
 
@@ -1772,7 +1780,7 @@ def get_connected_onedrive_connection(connection_id):
         raise ValueError("Select a connected OneDrive account before saving this index mode")
     if connection.get("provider") != ONEDRIVE_CLOUD_PROVIDER:
         raise ValueError("Selected cloud connection is not a OneDrive account")
-    ensure_cloud_connection_access(connection_id)
+    ensure_cloud_connection_access(connection_id, connection)
     return refresh_onedrive_token_if_needed(connection)
 
 
@@ -1894,7 +1902,7 @@ def get_connected_google_drive_connection(connection_id):
         raise ValueError("Select a connected Google Drive account before saving this index mode")
     if connection.get("provider") != GOOGLE_DRIVE_CLOUD_PROVIDER:
         raise ValueError("Selected cloud connection is not a Google Drive account")
-    ensure_cloud_connection_access(connection_id)
+    ensure_cloud_connection_access(connection_id, connection)
     return refresh_google_drive_token_if_needed(connection)
 
 
@@ -1904,7 +1912,7 @@ def get_connected_dropbox_connection(connection_id):
         raise ValueError("Select a connected Dropbox account before saving this index mode")
     if connection.get("provider") != DROPBOX_CLOUD_PROVIDER:
         raise ValueError("Selected cloud connection is not a Dropbox account")
-    ensure_cloud_connection_access(connection_id)
+    ensure_cloud_connection_access(connection_id, connection)
     return refresh_dropbox_token_if_needed(connection)
 
 
@@ -3646,9 +3654,8 @@ def is_test_bypass_request():
 
 
 def mail_token_matches(supplied):
-    expected = MAIL_TOKEN or ""
-    return bool(expected) and bool(supplied) and hmac.compare_digest(
-        supplied.encode(), expected.encode())
+    return MAIL_TOKEN not in PUBLIC_MAIL_TOKENS and bool(supplied) and hmac.compare_digest(
+        supplied.encode(), MAIL_TOKEN.encode())
 
 
 def warn_about_insecure_test_settings():
@@ -3659,58 +3666,33 @@ def warn_about_insecure_test_settings():
     elif test_bypass_enabled():
         logger.warning("PDFSEARCH_TEST_MODE is enabled: authorization bypass is active for integration tests. "
                        "Never enable it for a real installation.")
-    if MAIL_TOKEN in {"default_mail_token", "local-mail-token"}:
-        logger.warning("MAIL_TOKEN uses a public default; set a private random value in app/.env.")
+    if MAIL_TOKEN in PUBLIC_MAIL_TOKENS:
+        logger.info("Mail ingestion is disabled until MAIL_TOKEN is set to a private value.")
 
 
-def normalize_login(login):
-    return (login or "").strip().lower()
-
-
-def get_tailscale_login():
-    if not has_request_context():
-        return ""
-    return normalize_login(request.headers.get("Tailscale-User-Login"))
-
-
-def current_request_client():
-    real_ip = get_real_ip()
-    remote_ip = request.remote_addr or real_ip or "unknown"
-    tailscale_login = get_tailscale_login()
-    if tailscale_login:
-        return {
-            "key": f"tailscale:{tailscale_login}",
-            "display": f"Tailscale user {tailscale_login} ({real_ip or remote_ip})",
-        }
-    return {
-        "key": f"ip:{real_ip or remote_ip}",
-        "display": f"IP {real_ip or remote_ip}",
-    }
-
-
-def log_request_client_activity():
-    if is_test_bypass_request():
-        return
-
+def log_request_client_activity(principal):
+    peer = request.remote_addr or "unknown"
+    if principal["type"] == "tailscale":
+        key = f"tailscale:{principal['login']}"
+        display = f"Tailscale user {principal['login']} ({peer})"
+    else:
+        key = f"{principal['type']}:{peer}"
+        display = f"{principal['type'].capitalize()} client ({peer})"
     now = time.monotonic()
-    client = current_request_client()
     with request_client_lock:
-        for key, state in list(request_clients.items()):
+        for previous_key, state in list(request_clients.items()):
             idle_seconds = now - state.get("last_seen", now)
             if idle_seconds >= REQUEST_CLIENT_IDLE_SECONDS:
-                logger.info("Client disconnected: %s after %.0fs idle", state.get("display", key), idle_seconds)
-                request_clients.pop(key, None)
+                logger.info("Client disconnected: %s after %.0fs idle", state["display"], idle_seconds)
+                request_clients.pop(previous_key, None)
 
-        previous = request_clients.get(client["key"])
+        previous = request_clients.get(key)
         if not previous:
-            logger.info("Client connected: %s via %s %s", client["display"], request.method, request.path)
-        elif previous.get("display") != client["display"]:
-            logger.info("Client identity updated: %s", client["display"])
+            logger.info("Client connected: %s via %s %s", display, request.method, request.path)
+        elif previous["display"] != display:
+            logger.info("Client identity updated: %s", display)
 
-        request_clients[client["key"]] = {
-            "display": client["display"],
-            "last_seen": now,
-        }
+        request_clients[key] = {"display": display, "last_seen": now}
 
 
 def get_initial_admin_logins():
@@ -3740,12 +3722,6 @@ def discover_indices():
     index_names = []
     reserved_index_folder_names = {"uploads"}
 
-    try:
-        for configured_indices in get_role_to_indices().values():
-            index_names.extend(configured_indices)
-    except Exception:
-        logger.debug("Unable to read legacy role indices", exc_info=True)
-
     for root_folder in [INDEX_FOLDER, PDF_FOLDER]:
         try:
             if os.path.isdir(root_folder):
@@ -3763,151 +3739,154 @@ def discover_indices():
     return unique_valid_index_names(index_names)
 
 
+def access_index_names(raw_indices):
+    if not isinstance(raw_indices, list) or not all(isinstance(name, str) for name in raw_indices):
+        raise ValueError("Index names must be listed as strings")
+    return list(dict.fromkeys(validate_index_name(name.strip()) for name in raw_indices))
+
+
 def normalize_user_permissions(raw_permissions):
     if isinstance(raw_permissions, list):
-        raw_permissions = {"read": raw_permissions, "write": []}
-    elif not isinstance(raw_permissions, dict):
-        raw_permissions = {}
+        raw_permissions = {"read": raw_permissions}
+    if not isinstance(raw_permissions, dict):
+        raise ValueError("User permissions must be an object or a list of readable indexes")
 
-    read_indices = unique_valid_index_names(raw_permissions.get("read", []))
-    write_indices = unique_valid_index_names(raw_permissions.get("write", []))
-    read_indices = unique_valid_index_names(read_indices + write_indices)
+    is_admin = raw_permissions.get("admin", False)
+    if not isinstance(is_admin, bool):
+        raise ValueError("User admin permission must be true or false")
+    read_indices = access_index_names(raw_permissions.get("read", []))
+    write_indices = access_index_names(raw_permissions.get("write", []))
 
     return {
-        "admin": bool(raw_permissions.get("admin", False)),
-        "read": read_indices,
-        "write": write_indices
+        "admin": is_admin,
+        "read": list(dict.fromkeys(read_indices + write_indices)),
+        "write": write_indices,
     }
 
 
 def normalize_access_config(raw_config, include_discovered=True, strict=False):
     if not isinstance(raw_config, dict):
-        raw_config = {}
+        raise ValueError("Access configuration must be an object")
 
-    index_names = unique_valid_index_names(raw_config.get("indices", []))
+    raw_users = raw_config.get("users", {})
+    if not isinstance(raw_users, dict):
+        raise ValueError("Access configuration users must be an object")
+    index_names = dict.fromkeys(access_index_names(raw_config.get("indices", [])))
     if include_discovered:
-        index_names = unique_valid_index_names(index_names + discover_indices())
+        index_names.update(dict.fromkeys(discover_indices()))
 
     users = {}
-    for login, raw_permissions in (raw_config.get("users") or {}).items():
+    for login, raw_permissions in raw_users.items():
         normalized_login = normalize_login(login)
-        if not normalized_login:
-            continue
+        if not normalized_login or normalized_login in users:
+            raise ValueError("Access configuration requires one entry per valid Tailscale login")
 
         permissions = normalize_user_permissions(raw_permissions)
-        referenced_indices = unique_valid_index_names(permissions["read"] + permissions["write"])
-
         if strict:
-            unknown_indices = sorted(set(referenced_indices) - set(index_names))
+            unknown_indices = sorted(set(permissions["read"]).difference(index_names))
             if unknown_indices:
                 raise ValueError(
                     f"Unknown index permission for {normalized_login}: {', '.join(unknown_indices)}"
                 )
         else:
-            index_names = unique_valid_index_names(index_names + referenced_indices)
+            index_names.update(dict.fromkeys(permissions["read"]))
 
         users[normalized_login] = permissions
 
     return {
-        "indices": index_names,
+        "indices": list(index_names),
         "users": users
     }
 
 
-def load_access_config():
-    raw_config = {}
-    if os.path.exists(ACCESS_CONFIG_PATH):
-        with open(ACCESS_CONFIG_PATH, "r") as f:
-            raw_config = json.load(f)
+def read_access_config():
+    try:
+        with open(ACCESS_CONFIG_PATH, encoding="utf-8") as f:
+            raw_config = json.load(f, object_pairs_hook=unique_access_config_fields)
+    except FileNotFoundError:
+        raw_config = {}
+    return normalize_access_config(raw_config)
 
-    return normalize_access_config(raw_config, include_discovered=True)
+
+def unique_access_config_fields(pairs):
+    config = dict(pairs)
+    if len(config) != len(pairs):
+        raise ValueError("Access configuration has duplicate fields")
+    return config
+
+
+def load_access_config():
+    if not has_request_context():
+        return read_access_config()
+    if "pdfsearch.access_config" not in request.environ:
+        request.environ["pdfsearch.access_config"] = read_access_config()
+    return request.environ["pdfsearch.access_config"]
 
 
 def save_access_config(config):
     normalized = normalize_access_config(config, include_discovered=False, strict=True)
-    os.makedirs(os.path.dirname(ACCESS_CONFIG_PATH), exist_ok=True)
-    with open(ACCESS_CONFIG_PATH, "w") as f:
-        json.dump(normalized, f, indent=4)
+    config_dir = os.path.dirname(ACCESS_CONFIG_PATH) or "."
+    os.makedirs(config_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".access_config_", suffix=".json", dir=config_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(normalized, f, indent=4)
+        os.replace(temp_path, ACCESS_CONFIG_PATH)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     return normalized
 
 
-def get_user_permissions_for_login(login):
-    normalized_login = normalize_login(login)
-    access_config = load_access_config()
-    permissions = normalize_user_permissions(access_config.get("users", {}).get(normalized_login, {}))
+def resolve_request_principal():
+    if is_test_bypass_request():
+        kind, login = "test", "test-bypass"
+    elif (request.endpoint == "add_document" and request.method == "POST"
+            and "X-Mail-Token" in request.headers):
+        if ("Origin" in request.headers or has_proxy_headers(request.headers)
+                or not mail_token_matches(request.headers["X-Mail-Token"])):
+            return None
+        kind, login = "mail", ""
+    else:
+        identity = browser_identity(request, app.config)
+        if identity is None:
+            return None
+        kind, login = identity
 
-    if normalized_login in get_initial_admin_logins():
-        permissions["admin"] = True
+    if (request.endpoint, request.method) in {("manage_access_config", "PUT"), ("create_admin_index", "POST")}:
+        # Serialize permission changes from the snapshot through the write.
+        access_config_lock.acquire()
+        request.environ["pdfsearch.access_config_locked"] = True
 
-    if permissions["admin"]:
-        all_indices = access_config.get("indices", [])
-        permissions["read"] = all_indices
-        permissions["write"] = all_indices
-
-    return permissions
-
-
-def get_current_principal():
-    if has_request_context() and is_test_bypass_request():
-        indices = load_access_config().get("indices", [])
-        return {
-            "type": "test",
-            "id": "test-bypass",
-            "login": "test-bypass",
-            "role": "admin",
-            "is_admin": True,
-            "read": indices,
-            "write": indices
-        }
-
-    tailscale_login = get_tailscale_login()
-    if tailscale_login:
-        permissions = get_user_permissions_for_login(tailscale_login)
-        return {
-            "type": "tailscale",
-            "id": tailscale_login,
-            "login": tailscale_login,
-            "role": "admin" if permissions["admin"] else "user",
-            "is_admin": permissions["admin"],
-            "read": permissions["read"],
-            "write": permissions["write"]
-        }
-
-    # Local-only installations trust requests from the Docker host gateway, not
-    # other containers or requests carrying proxy identity headers.
-    if (os.environ.get("LOCAL_SINGLE_USER_MODE", "false").lower() == "true"
-            and not request.headers.get("X-Forwarded-For")
-            and request.remote_addr == get_docker_gateway_ip()):
-        return {
-            "type": "local", "id": "local", "login": "", "role": "admin",
-            "is_admin": True, "read": [], "write": []
-        }
-
-    user_ip = get_real_ip()
-    user_role = get_user_role(user_ip)
-    legacy_indices = get_role_to_indices().get(user_role, [])
+    config = load_access_config()
+    permissions = config["users"].get(login, {})
+    is_admin = kind in {"test", "local"} or (kind == "tailscale" and (
+        permissions.get("admin", False) or login in get_initial_admin_logins()
+    ))
     return {
-        "type": "ip",
-        "id": user_ip,
-        "login": "",
-        "role": user_role,
-        "is_admin": user_role == "admin",
-        "read": legacy_indices,
-        "write": legacy_indices
+        "type": kind,
+        "id": login or kind,
+        "login": login,
+        "role": "admin" if is_admin else "user",
+        "is_admin": is_admin,
+        "read": config["indices"] if is_admin else permissions.get("read", []),
+        "write": config["indices"] if is_admin or kind == "mail" else permissions.get("write", []),
     }
 
 
+def get_current_principal():
+    if "pdfsearch.principal" not in request.environ:
+        request.environ["pdfsearch.principal"] = resolve_request_principal()
+    return request.environ["pdfsearch.principal"]
+
+
 def get_accessible_indices(action="read"):
-    principal = get_current_principal()
-    if principal["is_admin"] and principal["type"] in {"local", "ip"}:
-        return load_access_config().get("indices", [])
-    if action == "write":
-        return principal.get("write", [])
-    return unique_valid_index_names(principal.get("read", []) + principal.get("write", []))
+    principal = get_current_principal() if has_request_context() else None
+    return principal[action] if principal else []
 
 
 def ensure_admin_access():
-    if has_request_context() and not get_current_principal()["is_admin"]:
+    if has_request_context() and not (get_current_principal() or {}).get("is_admin"):
         raise PermissionError("Admin access required")
     return True
 
@@ -3916,15 +3895,10 @@ def ensure_index_access(index_name, action="read"):
     validate_index_name(index_name)
 
     if has_request_context():
-        if is_test_bypass_request():
-            return True
-
         if action not in {"read", "write"}:
             raise ValueError("Invalid access action")
-
-        available_indices = get_accessible_indices(action)
-
-        if index_name not in available_indices:
+        principal = get_current_principal()
+        if not principal or (principal["type"] != "test" and index_name not in principal[action]):
             raise PermissionError(f"Access denied to index '{index_name}'")
 
     return True
@@ -3990,49 +3964,41 @@ def extract_zip_safely(zip_ref, destination):
             raise ValueError(f"Unsafe path in ZIP archive: {member.filename}")
         zip_ref.extract(member, destination)
 
-# Prevent internal containers from reaching arbitrary backend routes.
 @app.before_request
-def block_internal_requests_except_add_document():
-    remote_ip = request.remote_addr or ""
-    is_internal = remote_ip.startswith("172.")  # Docker subnet usually starts with 172.
-
-    test_bypass = is_test_bypass_request()
-    if test_bypass:
-        g.skip_antivirus = True
-    else:
-        g.skip_antivirus = False
-        log_request_client_activity()
-
-    # Internal app containers may only call the mail ingestion endpoint.
-    if is_internal and not test_bypass and get_docker_gateway_ip() != remote_ip:
-        if request.path == "/add-document":
-            token = request.headers.get("X-Mail-Token")
-            if not mail_token_matches(token):
-                alert_message = f"🚨 Internal container ({remote_ip}) used wrong token to access : {request.path}"
-                logger.error(alert_message)
-                send_alert_email("🚨 SECURITY ALERT: Forbidden Access Attempt", alert_message)
-                abort(403, description="Invalid mail token")
-        else:
-            alert_message = f"🚨 Internal container ({remote_ip}) attempted to access forbidden route: {request.path}"
-            logger.error(alert_message)
-            send_alert_email("🚨 SECURITY ALERT: Forbidden Access Attempt", alert_message)
-            abort(403, description="Access denied for internal container")
-
-
-def get_docker_gateway_ip():
-    global docker_gateway_ip_cache
-    if docker_gateway_ip_cache:
-        return docker_gateway_ip_cache
-    try:
-        output = subprocess.check_output("ip route | grep default", shell=True).decode()
-        gateway_ip = output.strip().split()[2]
-        docker_gateway_ip_cache = gateway_ip
-        return gateway_ip
-    except Exception as e:
-        # Without a default route (for example on an internal-only network) there is no
-        # Docker host gateway, so no request can be trusted as coming from the host.
-        logger.warning("Failed to detect Docker gateway IP: %s", e)
+def authorize_request():
+    if (request.endpoint == "health" and request.method in {"GET", "HEAD"}) or (
+        request.method == "OPTIONS" and request.url_rule and request.url_rule.provide_automatic_options
+    ):
         return None
+
+    try:
+        principal = get_current_principal()
+    except (OSError, ValueError):
+        logger.error("Unable to load access configuration", exc_info=True)
+        return authorization_error("Access configuration is unavailable", 503)
+    if principal is None:
+        return authorization_error("Access denied", 403)
+    if (principal["type"] == "tailscale" and not principal["is_admin"]
+            and request.endpoint not in {"auth_me", "get_indices"}
+            and principal["login"] not in load_access_config()["users"]):
+        return authorization_error("This Tailscale user has no configured access", 403)
+
+    g.skip_antivirus = principal["type"] == "test"
+    if not g.skip_antivirus:
+        log_request_client_activity(principal)
+
+
+def authorization_error(message, status):
+    response = jsonify({"error": message})
+    response.status_code = status
+    response.cache_control.no_store = True
+    return response
+
+
+@app.teardown_request
+def release_access_config_lock(_error):
+    if request.environ.pop("pdfsearch.access_config_locked", False):
+        access_config_lock.release()
 
 
 def update_task_status(task_id, status, message=None, result=None, index_name=None, coordinator=None):
@@ -5000,35 +4966,9 @@ def save_roles(roles):
         json.dump(roles, f)
 
 
-def get_user_role(ip):
-    roles = load_roles()
-
-    # First check exact match
-    if ip in roles:
-        return roles[ip]
-
-    # Now check if the IP is in any CIDR block
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        for cidr, role in roles.items():
-            try:
-                if '/' in cidr:  # Only check CIDR entries
-                    if ip_obj in ipaddress.ip_network(cidr, strict=False):
-                        return role
-            except ValueError:
-                continue  # Invalid CIDR, skip
-    except ValueError:
-        pass  # Invalid IP
-
-    return "default"  # fallback role
-
-
 @app.route('/roles', methods=['GET', 'POST'])
 def manage_roles():
-    """
-    GET: Fetch current roles.
-    POST: Update roles (requires IP and role data).
-    """
+    """Read or edit archived IP roles for legacy clients. These grant no access."""
     try:
         ensure_admin_access()
 
@@ -5051,29 +4991,17 @@ def manage_roles():
         return jsonify({"error": str(e)}), 403
 
 
-def get_role_to_indices():
-    """Read optional legacy role mappings from installation-local configuration."""
-    if not os.path.exists(ROLE_INDEX_CONFIG_PATH):
-        return {}
-    with open(ROLE_INDEX_CONFIG_PATH, encoding="utf-8") as f:
-        mappings = json.load(f)
-    if not isinstance(mappings, dict):
-        raise ValueError("Role index mappings must be a JSON object")
-    return {str(role): unique_valid_index_names(indices)
-            for role, indices in mappings.items() if isinstance(indices, list)}
-
-
 @app.route("/clean-test-index", methods=["POST"])
 def clean_test_index():
+    if get_current_principal()["type"] != "test":
+        return authorization_error("Test authorization required", 403)
+
     index_name = "test_index"
     index_path = os.path.join(INDEX_FOLDER, index_name)
     ocr_path = os.path.join(PDF_FOLDER , index_name)
     tmp_path = os.path.join(TMP_FOLDER, index_name)
 
     try:
-        if not is_test_bypass_request():
-            ensure_index_access(index_name, action="write")
-
         # Remove index folder
         if os.path.exists(index_path):
             shutil.rmtree(index_path)
@@ -5156,7 +5084,9 @@ def manage_access_config():
                 "current_user": get_current_principal()
             }), 200
 
-        data = request.get_json(silent=True) or {}
+        data = app.json.loads(request.get_data(), object_pairs_hook=unique_access_config_fields) if request.is_json else None
+        if not isinstance(data, dict):
+            raise ValueError("Access configuration must be an object")
         config = data.get("config", data)
         saved_config = save_access_config(config)
         return jsonify({
@@ -5188,30 +5118,27 @@ def create_admin_index():
 
         access_config = load_access_config()
         already_registered = index_name in access_config.get("indices", [])
-        if not principal["is_admin"]:
-            if already_registered:
-                ensure_index_access(index_name, action="write")
-            elif not principal.get("login"):
-                raise PermissionError("Creating an index requires a signed-in Tailscale user")
+        if already_registered:
+            ensure_index_access(index_name, action="write")
+        available_indices = get_accessible_indices()
 
-        create_or_open_index(index_name, check_access=False)
-        os.makedirs(os.path.join(PDF_FOLDER, index_name), exist_ok=True)
-        os.makedirs(os.path.join(TMP_FOLDER, index_name), exist_ok=True)
         index_config = (
             save_index_config(index_name, requested_index_config)
             if requested_index_config else
             load_index_config(index_name)
         )
+        create_or_open_index(index_name, check_access=False)
+        os.makedirs(os.path.join(PDF_FOLDER, index_name), exist_ok=True)
+        os.makedirs(os.path.join(TMP_FOLDER, index_name), exist_ok=True)
 
         if not already_registered:
-            access_config["indices"] = unique_valid_index_names(access_config.get("indices", []) + [index_name])
+            access_config["indices"] = access_config["indices"] + [index_name]
             if not principal["is_admin"]:
-                login = normalize_login(principal["login"])
-                user_permissions = normalize_user_permissions(access_config.setdefault("users", {}).get(login, {}))
-                user_permissions["read"] = unique_valid_index_names(user_permissions.get("read", []) + [index_name])
-                user_permissions["write"] = unique_valid_index_names(user_permissions.get("write", []) + [index_name])
-                access_config["users"][login] = user_permissions
+                user_permissions = access_config["users"][principal["login"]]
+                user_permissions["read"] = user_permissions["read"] + [index_name]
+                user_permissions["write"] = user_permissions["write"] + [index_name]
             access_config = save_access_config(access_config)
+            available_indices = available_indices + [index_name]
 
         cloud_sync_task_id = None
         if index_has_cloud_source(index_name, index_config):
@@ -5222,7 +5149,7 @@ def create_admin_index():
             "index_name": index_name,
             "created": not already_registered,
             "config": access_config if principal["is_admin"] else None,
-            "available_indices": get_accessible_indices(),
+            "available_indices": available_indices,
             "index_config": public_index_config(index_name),
             "cloud_sync_task_id": cloud_sync_task_id,
         }), 201 if not already_registered else 200
@@ -5358,8 +5285,8 @@ def get_cloud_connection_status(connection_id):
                 raise PermissionError("Access denied to this cloud login")
             return jsonify(sanitize_cloud_auth_session(session)), 200
 
-        ensure_cloud_connection_access(connection_id)
         connection = get_cloud_connection(connection_id)
+        ensure_cloud_connection_access(connection_id, connection)
         if not connection:
             return jsonify({"error": "Cloud connection not found"}), 404
         return jsonify(sanitize_cloud_connection(connection)), 200
@@ -5378,11 +5305,14 @@ def cloud_connection_callback(provider):
     code = request.args.get("code")
     error = request.args.get("error")
     error_description = request.args.get("error_description")
-    if provider == GOOGLE_DRIVE_CLOUD_PROVIDER:
-        return complete_google_drive_login(state, code=code, error=error, error_description=error_description)
-    if provider == DROPBOX_CLOUD_PROVIDER:
-        return complete_dropbox_login(state, code=code, error=error, error_description=error_description)
-    return cloud_login_result_page("Cloud login", "Unsupported cloud provider callback.", ok=False)
+    try:
+        if provider == GOOGLE_DRIVE_CLOUD_PROVIDER:
+            return complete_google_drive_login(state, code=code, error=error, error_description=error_description)
+        if provider == DROPBOX_CLOUD_PROVIDER:
+            return complete_dropbox_login(state, code=code, error=error, error_description=error_description)
+        return cloud_login_result_page("Cloud login", "Unsupported cloud provider callback.", ok=False)
+    except PermissionError as e:
+        return authorization_error(str(e), 403)
 
 
 @app.route("/index-config", methods=["GET", "PUT"])
@@ -5905,18 +5835,6 @@ def add_to_index(
         )
 
     return True
-
-
-def get_real_ip():
-    """
-    Retrieves the real IP address of the client, considering reverse proxy headers.
-    """
-    if has_request_context():
-        if request.headers.get("X-Forwarded-For"):
-            return request.headers.get("X-Forwarded-For").split(",")[0].strip()
-        return request.remote_addr
-    return "background-task"
-
 
 
 @app.route('/delete-document', methods=['POST'])
@@ -9497,6 +9415,5 @@ warn_about_insecure_test_settings()
 
 
 if __name__ == "__main__":
-    #ts_ip = get_tailscale_ip()
-    #print(f"Running Flask on Tailscale IP: {ts_ip}")
-    app.run(host="0.0.0.0", port=5050)
+    # Compose publishes the container port on the host's loopback only.
+    app.run(host="0.0.0.0" if RUNNING_IN_DOCKER else "127.0.0.1", port=5050)

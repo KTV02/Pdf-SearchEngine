@@ -12,7 +12,7 @@ docker compose up -d --build
 
 Open [http://localhost:8080](http://localhost:8080). On the first run, ClamAV must download its virus definitions and become healthy before the backend starts; this can take several minutes. Check progress with `docker compose ps` and `docker compose logs -f clamav backend`. Open **Admin**, create an index, then upload a PDF to it.
 
-This default is for one person using the computer running Docker. The frontend, backend and mail ports bind to the host's loopback interface. The backend grants local admin access to direct requests from the Docker host gateway when `LOCAL_SINGLE_USER_MODE=true`. It is not a public login system: anyone with sufficient access to that host or its Docker environment may be able to act as administrator. Do not expose these ports to an untrusted network or use a reverse proxy without configuring authentication and disabling local single-user mode.
+This default is for one person using the computer running Docker. Compose binds the frontend, backend, and mail ports to the host's loopback interface. With `LOCAL_SINGLE_USER_MODE=true`, the backend grants admin access to direct localhost requests received from loopback or the Docker host gateway. Keep the loopback bindings and use this mode only on a trusted host. Use shared mode for access through a proxy.
 
 Your data is stored under `app/data/`, excluded from Git. It contains PDF and cloud mirrors, indexes, settings, logs, mail task state, and backups; back it up separately. Removing containers does not delete these host directories. Some of this data, including mail and cloud credentials, can be sensitive.
 
@@ -33,12 +33,13 @@ Common options:
 | `TMP_STORAGE_HOST_PATH`, `LOG_STORAGE_HOST_PATH` | `./data/tmp`, `./data/logs` | Temporary files and logs. |
 | `CLOUD_STORAGE_HOST_PATH`, `EMAIL_CONFIG_HOST_PATH` | `./data/cloud`, `./data/email_configs` | Cloud mirrors and saved email configurations. |
 | `MAIL_STATE_HOST_PATH`, `BACKUP_STORAGE_HOST_PATH` | `./data/mail_state`, `./data/backups` | Mail task state and backup snapshots. |
-| `LOCAL_SINGLE_USER_MODE` | `true` | Allow direct requests from the Docker host gateway to act as a local admin. Set to `false` for authenticated multi-user access. |
+| `LOCAL_SINGLE_USER_MODE` | `true` in Compose | `true` allows direct localhost administration. `false` requires the shared-mode proxy login. |
+| `PDFSEARCH_TRUSTED_PROXY_IP` | empty | Optional exact address of the immediate proxy peer in shared mode. When set, only this address is trusted. |
 | `PDFSEARCH_ALLOWED_ORIGINS` | Localhost and 127.0.0.1 on ports 8080, 80 and 5050 | Comma-separated exact frontend origins; update when changing the frontend port or using a reverse proxy. |
-| `ADMIN_TAILSCALE_USERS` | empty | Comma-separated Tailscale login emails for initial administrators. |
-| `MAIL_TOKEN` | `local-mail-token` | Shared internal mail-ingestion token. Set a private random value for an installation; both services receive the same value. |
+| `ADMIN_TAILSCALE_USERS` | empty | Comma-separated Tailscale logins for initial administrators. |
+| `MAIL_TOKEN` | empty | Set a private random value to enable mail ingestion. Compose passes it to the backend and the mail processor. |
 
-Relative storage paths are resolved relative to `app/`, even when Compose is invoked at the repository root. The backend automatically treats a missing access file as an empty configuration; `app/data/config/access_config.json` and `roles.json` are created when settings are saved. `role_indices.json` in the same directory optionally maps legacy IP role names to lists of index names. These files belong to the installation, not the source repository.
+Relative storage paths are resolved relative to `app/`, even when Compose is invoked at the repository root. The backend treats a missing access file as an empty configuration and creates `app/data/config/access_config.json` when access settings are saved. Keep this file private.
 
 For settings that cannot be expressed as environment variables, create an ignored `compose.override.yaml` in the repository root. Compose automatically combines it with the base configuration when invoked from the repository root. For example, a coordinator token can be mounted read-only:
 
@@ -55,9 +56,11 @@ The file must contain a single nonempty token without whitespace. Set `NODERED_C
 
 ## Networked and multi-user installations
 
-Tailscale Serve can proxy the loopback frontend and backend and provide a `Tailscale-User-Login` identity. Set `LOCAL_SINGLE_USER_MODE=false`, configure `ADMIN_TAILSCALE_USERS`, and add the exact HTTPS frontend origin to `PDFSEARCH_ALLOWED_ORIGINS`. Expose both the frontend and API ports through the trusted proxy; the browser uses the configured `BACKEND_PORT` on the same hostname. Keep direct backend access restricted to the trusted proxy and ensure it strips untrusted identity and forwarding headers before setting its own. A request with a forged identity header can otherwise impersonate a user. `roles.json` is a legacy IP-based fallback and must not grant broad network ranges administrator access. Use the Admin interface to manage users, per-index permissions, and indexes.
+Set `LOCAL_SINGLE_USER_MODE=false`, configure `ADMIN_TAILSCALE_USERS` with actual Tailscale logins, and add the exact HTTPS frontend origin to `PDFSEARCH_ALLOWED_ORIGINS`. Use Tailscale Serve for the frontend and API ports on the same hostname. The browser connects to the configured `BACKEND_PORT`. Serve replaces incoming `Tailscale-User-Login` headers with the authenticated user's login. Keep the direct backend and mail ports private, and limit access to the proxy's backend path to trusted host processes. See [Tailscale Serve identity headers](https://tailscale.com/docs/features/tailscale-serve#identity-headers).
 
-The origin policy rejects requests carrying an unapproved browser `Origin` and checks cross-site browser writes. It does not authenticate non-browser clients. Never use the default internal mail token or a test bypass token as an Internet-facing security boundary.
+The backend checks the immediate connection peer before accepting the login. By default it accepts loopback or the single IPv4 default gateway detected inside the Docker container. For a different proxy layout, use `PDFSEARCH_TRUSTED_PROXY_IP` with the proxy's exact address as seen by the backend and restrict network access to that proxy. Use the Admin interface to register users and grant index permissions. An unregistered login sees an empty index list until an administrator grants access. For existing IP-based grants, follow the [migration guide](docs/migration.md).
+
+Configure Google Drive and Dropbox return URLs on the same API endpoint the browser uses through Serve. The browser must return under the Tailscale identity that started the connection. Mail ingestion uses the private `MAIL_TOKEN` for the mail processor's uploads to existing indexes. Keep the mail processor's control port on loopback.
 
 ## Indexes, cloud, and backups
 
