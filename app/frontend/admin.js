@@ -35,7 +35,7 @@ const AdminManager = {
     },
     methods: {
         normalizeLogin(login) {
-            return (login || '').trim().toLowerCase();
+            return (login || '').trim().replace(/[A-Z]/g, letter => letter.toLowerCase());
         },
         normalizeIndexName(indexName) {
             return (indexName || '').trim();
