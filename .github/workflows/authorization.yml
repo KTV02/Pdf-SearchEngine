@@ -1,0 +1,31 @@
+name: Authorization tests
+
+on:
+  push:
+    paths:
+      - 'app/**'
+      - '.github/workflows/authorization.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - '.github/workflows/authorization.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  authorization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the application test image
+        run: docker build --tag pdfsearch-tests --file app/tests/Dockerfile.test app
+      - name: Check browser permissions and mail task isolation
+        run: |
+          docker run --rm --network none pdfsearch-tests pytest -q \
+            /app/tests/test_request_authorization.py \
+            /app/tests/test_email_processor_api.py \
+            /app/tests/test_email_processor_units.py
