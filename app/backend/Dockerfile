@@ -6,15 +6,15 @@ RUN apk add --no-cache poppler-utils tesseract-ocr tesseract-ocr-data-deu tesser
 # Set work directory
 WORKDIR /app
 
-# Copy code
-COPY . /app
-
 # Install Python dependencies
 RUN python -m pip install --no-cache-dir pip==26.2.1 setuptools==79.0.1 wheel==0.46.3
+COPY requirements.security.lock ./
 RUN python -m pip install --no-cache-dir --no-build-isolation --only-binary=lxml,pikepdf,pillow,psutil,pycryptodome,MarkupSafe,charset-normalizer -r requirements.security.lock
 
 # Create folders
 RUN mkdir -p ocr/converted/uploads index_folder tmp
+
+COPY . /app
 
 # Expose Flask port
 ENV PDFSEARCH_BIND_ADDRESS=0.0.0.0

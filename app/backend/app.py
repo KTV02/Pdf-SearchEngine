@@ -5958,7 +5958,7 @@ def add_document():
                             "code": "invalid_file"}), 400
 
         task_id = str(uuid.uuid4())
-        # ClamAV scans this path through its read-only mount of TMP_FOLDER.
+        # ClamAV scans this path through its shared mount of TMP_FOLDER.
         # Keep direct uploads separate from one another and the batch importer.
         staging_directory = os.path.join(TMP_FOLDER, f".upload-{task_id}")
         os.mkdir(staging_directory, mode=0o755)

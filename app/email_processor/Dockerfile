@@ -2,9 +2,10 @@ FROM docker.io/library/python@sha256:16bf2b5c59a08523519d3c8589deca849285dee1d62
 
 WORKDIR /app
 
-COPY . /app
-
 RUN python -m pip install --no-cache-dir pip==26.2.1 setuptools==79.0.1 wheel==0.46.3
+COPY requirements.security.lock ./
 RUN python -m pip install --no-cache-dir --no-build-isolation -r requirements.security.lock
+
+COPY . /app
 
 CMD ["python", "processor_api.py"]

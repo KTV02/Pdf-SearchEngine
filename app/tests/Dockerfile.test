@@ -4,6 +4,15 @@ FROM python:3.10-slim
 WORKDIR /app
 ENV PYTHONPATH=/app/backend
 
+RUN pip install --upgrade pip
+COPY backend/requirements.txt backend/requirements.txt
+COPY email_processor/requirements.txt email_processor/requirements.txt
+COPY tests/requirements.txt tests/requirements.txt
+RUN pip install --no-cache-dir \
+    -r backend/requirements.txt \
+    -r email_processor/requirements.txt \
+    -r tests/requirements.txt
+
 # Copy app code needed by unit tests plus the test suite.
 COPY ./backend ./backend
 COPY ./email_processor ./email_processor
@@ -12,11 +21,6 @@ COPY ./docker-compose.yml ./docker-compose.yml
 COPY ./compose.integration.yml ./compose.integration.yml
 COPY ./pytest.ini ./pytest.ini
 
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir \
-    -r backend/requirements.txt \
-    -r email_processor/requirements.txt \
-    -r tests/requirements.txt
 RUN rm -rf /app/index_folder/test_index
 RUN rm -rf /app/ocr/converted/test_index
 RUN rm -rf /app/tmp/test_index
