@@ -5932,56 +5932,48 @@ def process_delete_document(index_name, doc_id, task_id):
         update_task_status(task_id, "failed", message=f"Delete task failed: {e}", index_name=index_name)
 
 
-#takes zip or pdf, applies odr-indexing pipeline to all members
 @app.route('/add-document', methods=['POST'])
 def add_document():
+    unqueued_directory = None
     try:
-    # Ensure file is provided
-        if 'file' not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
+        file = request.files.get("file")
+        if file is None:
+            return jsonify({"error": "No file uploaded", "code": "invalid_file"}), 400
+        if not file.filename:
+            return jsonify({"error": "No selected file", "code": "invalid_file"}), 400
 
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-    #ensure index is selected
         index_name = request.form.get("index_name")
         if not index_name:
             return jsonify({"error": "Index name is required"}), 400
         ensure_index_access(index_name, action="write")
         ensure_index_accepts_uploads(index_name)
+        validate_index_name(index_name)
 
-
-    # Save uploaded file to a temp folder
         filename = secure_filename(file.filename)
-        tmp_index_path = os.path.join(TMP_FOLDER, validate_index_name(index_name))
-        os.makedirs(tmp_index_path, exist_ok=True)
-        temp_file_path = os.path.join(tmp_index_path, filename)
-        file.save(temp_file_path)
-        logger.info(f"📥 Saved file for processing: {temp_file_path}")
+        extension = Path(file.filename).suffix.lower()
+        if extension in {".pdf", ".zip"} and filename.lower() == extension[1:]:
+            filename = "document" + extension
+        if not filename or len(filename) > 255:
+            return jsonify({"error": "Use a filename with 1 to 255 usable characters",
+                            "code": "invalid_file"}), 400
 
-
-
-        # Enqueue the processing!!! All tasks that need exclusive index access (e.g. write) need queuing
-        # Generate a task ID
         task_id = str(uuid.uuid4())
+        # ClamAV scans this path through its read-only mount of TMP_FOLDER.
+        # Keep direct uploads separate from one another and the batch importer.
+        staging_directory = os.path.join(TMP_FOLDER, f".upload-{task_id}")
+        os.mkdir(staging_directory, mode=0o755)
+        unqueued_directory = staging_directory
+        temp_file_path = os.path.join(staging_directory, filename)
+        file.save(temp_file_path)
+
         update_task_status(task_id, "queued", message="Queued add-document task", index_name=index_name)
         notify_coordinator("task_queued", index_name, task_id, "upload", {"source_file": filename})
-
-        # Enqueue task for background processing, see "process_uploaded_file" below
         task_queue.enqueue(
-            index_name,
-            process_uploaded_file,
-            index_name,
-            temp_file_path,
-            filename,
-            task_id,
-            getattr(g, "skip_antivirus", False)
+            index_name, process_uploaded_file, index_name, temp_file_path, filename,
+            task_id, getattr(g, "skip_antivirus", False),
         )
-
-        return jsonify({
-            "message": "Document is being processed.",
-            "task_id": task_id
-        }), 202
+        unqueued_directory = None
+        return jsonify({"message": "Document is being processed.", "task_id": task_id}), 202
 
     except PermissionError as e:
         logger.warning(f"Forbidden add-document request: {e}")
@@ -5992,6 +5984,11 @@ def add_document():
     except Exception as e:
         logger.error(f"Error in /add-document: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {e}"}), 500
+    finally:
+        if unqueued_directory is not None:
+            shutil.rmtree(unqueued_directory, ignore_errors=True)
+            if task_status.get(task_id, {}).get("status") == "queued":
+                update_task_status(task_id, "failed", message="Could not queue document", index_name=index_name)
 
 
 def scan_uploaded_file_for_task(file_path, filename, task_id, index_name):
@@ -6682,6 +6679,17 @@ def process_uploaded_file(index_name, temp_file_path, filename, task_id,skip_av=
             "source_file": filename,
             "error": str(e),
         })
+    finally:
+        staging_directory = os.path.join(TMP_FOLDER, f".upload-{task_id}")
+        if (os.path.dirname(temp_file_path) == staging_directory
+                and task_status.get(task_id, {}).get("status") in {"done", "failed"}):
+            try:
+                if os.path.isfile(temp_file_path):
+                    # Preserve an unprocessed input for the existing TMP retry action.
+                    move_with_unique_name(temp_file_path, os.path.join(TMP_FOLDER, index_name))
+                shutil.rmtree(staging_directory)
+            except OSError:
+                logger.warning("Could not reclaim staging for upload %s", task_id, exc_info=True)
 
 
 @app.route('/process-tmp', methods=['POST'])
@@ -7612,44 +7620,41 @@ def process_single_file(file_path, index_name, ix=None, writer=None, coordinator
         raise FileNotFoundError(f"File not found: {file_path}")
 
     original_file_path = file_path
-    generated_ocr_path = None
     should_pause = make_coordinator_pause_checker(coordinator_task_id)
     if should_pause:
         should_pause()
 
-    # Step 1: OCR if needed
-    if not is_pdf_searchable(file_path):
-        ocr_output_path = file_path.replace(".pdf", "_ocr.pdf")
-        generated_ocr_path = ocr_output_path
+    # Different indexes can process documents with the same name concurrently.
+    # Keep all intermediate output private to this invocation.
+    filename = os.path.basename(file_path)
+    with tempfile.TemporaryDirectory(dir=TMP_FOLDER, prefix=".pdf-work-") as work_dir:
+        if not is_pdf_searchable(file_path):
+            stem, extension = os.path.splitext(filename)
+            filename = f"{stem}_ocr{extension or '.pdf'}"
+            ocr_dir = os.path.join(work_dir, "ocr")
+            os.mkdir(ocr_dir)
+            ocr_output = os.path.join(ocr_dir, "document.pdf")
+            try:
+                convert_pdf_to_searchable(file_path, ocr_output, should_pause=should_pause)
+                file_path = ocr_output
+            except CoordinatorPauseRequested:
+                raise
+            except Exception as e:
+                logger.error(f"OCR failed: {e}")
+                raise RuntimeError(f"OCR failed for {original_file_path}: {e}")
+
+        compressed_path = os.path.join(work_dir, filename)
         try:
-            convert_pdf_to_searchable(file_path, ocr_output_path, should_pause=should_pause)
-            file_path = ocr_output_path
+            compress_pdf(file_path, compressed_path, should_pause=should_pause)
         except CoordinatorPauseRequested:
-            if os.path.exists(ocr_output_path):
-                os.remove(ocr_output_path)
             raise
         except Exception as e:
-            logger.error(f"OCR failed: {e}")
-            raise RuntimeError(f"OCR failed for {file_path}: {e}")
+            logger.error(f"Compression failed: {e}")
+            raise RuntimeError(f"Compression failed for {original_file_path}: {e}")
 
-    # Step 2: Compress
-    compressed_path = os.path.join(TMP_FOLDER, os.path.basename(file_path))
-    try:
-        compress_pdf(file_path, compressed_path, should_pause=should_pause)
-    except CoordinatorPauseRequested:
-        if os.path.exists(compressed_path):
-            os.remove(compressed_path)
-        if generated_ocr_path and os.path.exists(generated_ocr_path):
-            os.remove(generated_ocr_path)
-        raise
-    except Exception as e:
-        logger.error(f"Compression failed: {e}")
-        raise RuntimeError(f"Compression failed for {file_path}: {e}")
-
-    # Step 3: Move to final location
-    if should_pause:
-        should_pause()
-    final_path = move_with_unique_name(compressed_path, pdf_index_folder)
+        if should_pause:
+            should_pause()
+        final_path = move_with_unique_name(compressed_path, pdf_index_folder)
 
     try:
         # Step 4: Index it (shared or single writer)

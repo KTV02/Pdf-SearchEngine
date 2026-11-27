@@ -2106,6 +2106,64 @@ def test_hybrid_cloud_sync_prefers_identical_cloud_file_over_standalone_copy(bac
     ).exists()
 
 
+def test_queued_uploads_keep_their_bytes_and_original_names(backend_module, monkeypatch):
+    app = backend_module
+    jobs = []
+    work_paths = []
+    monkeypatch.setattr(app.task_queue, "enqueue", lambda key, fn, *args: jobs.append((fn, args)))
+    monkeypatch.setattr(app, "wait_before_indexing_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "notify_coordinator", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "make_coordinator_pause_checker", lambda task_id: None)
+    monkeypatch.setattr(app, "is_pdf_searchable", lambda path: True)
+    monkeypatch.setattr(app, "add_to_index", lambda *args, **kwargs: None)
+
+    def compress(source, destination, **kwargs):
+        work_paths.append(Path(destination))
+        shutil.copyfile(source, destination)
+
+    monkeypatch.setattr(app, "compress_pdf", compress)
+    client = app.app.test_client()
+    files = [("test_index", "example-intake.pdf", b"fixture-A"), ("test_index", "example-intake.pdf", b"fixture-B"),
+             ("second_index", "example-intake.pdf", b"fixture-C"), ("second_index", "文書.pdf", b"fixture-D")]
+    for index, name, content in files:
+        response = client.post("/add-document", headers=BYPASS_HEADERS, data={
+            "index_name": index, "file": (io.BytesIO(content), name),
+        })
+        assert response.status_code == 202
+
+    sources = [Path(args[1]) for _, args in jobs]
+    assert [p.read_bytes() for p in sources] == [content for _, _, content in files]
+    assert len({p.parent for p in sources}) == len(files)
+    for handler, args in jobs:
+        handler(*args)
+    library = Path(app.PDF_FOLDER)
+    assert (library / "test_index/example-intake.pdf").read_bytes() == b"fixture-A"
+    assert (library / "test_index/example-intake_1.pdf").read_bytes() == b"fixture-B"
+    assert (library / "second_index/example-intake.pdf").read_bytes() == b"fixture-C"
+    assert (library / "second_index/document.pdf").read_bytes() == b"fixture-D"
+    assert len({p.parent for p in work_paths}) == len(files)
+    assert all(not p.parent.exists() for p in sources + work_paths)
+
+
+def test_upload_rejection_and_queue_failure_leave_no_pending_task(backend_module, monkeypatch):
+    app = backend_module
+    client = app.app.test_client()
+    empty = client.post("/add-document", headers=BYPASS_HEADERS, data={"index_name": "test_index"})
+    assert empty.status_code == 400 and empty.json["code"] == "invalid_file"
+
+    def cannot_queue(*args):
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(app, "notify_coordinator", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app.task_queue, "enqueue", cannot_queue)
+    response = client.post("/add-document", headers=BYPASS_HEADERS, data={
+        "index_name": "test_index", "file": (io.BytesIO(b"test"), "example-queue-input.pdf"),
+    })
+    assert response.status_code == 500
+    assert not list(Path(app.TMP_FOLDER).glob(".upload-*"))
+    assert [t["status"] for t in app.task_status.values()] == ["failed"]
+
+
 def test_upload_task_reports_antivirus_readiness_failure(backend_module, tmp_path, monkeypatch):
     upload_path = tmp_path / "upload.pdf"
     upload_path.write_bytes(b"%PDF-1.4\n")
