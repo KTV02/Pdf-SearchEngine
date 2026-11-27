@@ -23,10 +23,8 @@ jobs:
           persist-credentials: false
       - name: Build the application test image
         run: docker build --tag pdfsearch-tests --file app/tests/Dockerfile.test app
-      - name: Check browser permissions and mail task isolation
+      - name: Run the offline application tests
         run: |
-          docker run --rm --network none pdfsearch-tests pytest -q \
-            /app/tests/test_request_authorization.py \
-            /app/tests/test_backend_units.py \
-            /app/tests/test_email_processor_api.py \
-            /app/tests/test_email_processor_units.py
+          docker run --rm --network none \
+            --mount "type=bind,src=$PWD/app/frontend/index.html,dst=/app/frontend/index.html,readonly" \
+            pdfsearch-tests pytest -q -m 'not integration' /app/tests
