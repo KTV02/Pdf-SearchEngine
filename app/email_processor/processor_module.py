@@ -214,7 +214,15 @@ def start_task(mode, config_path, task_id=None, save=True):
     task_id = task_id or str(uuid.uuid4())
     return _start_task_thread(task_id, mode, config_path, config, save=save)
 
-def stop_task(task_id):
+def stop_task(task_id, index_name=None):
+    if index_name:
+        meta = task_configs.get(task_id)
+        if not meta:
+            raise LookupError("Email task not found for this index")
+        with open(meta["config_path"], encoding="utf-8") as f:
+            if json.load(f).get("index_name") != index_name:
+                raise LookupError("Email task not found for this index")
+
     event = cancel_flags.get(task_id)
     if event:
         event.set()

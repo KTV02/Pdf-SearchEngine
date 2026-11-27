@@ -54,11 +54,13 @@ def stop_email_task():
     try:
         data = request.get_json()
         task_id = data.get("task_id")
-        if not task_id:
+        if not isinstance(task_id, str) or not task_id:
             return jsonify({"error": "Missing task_id"}), 400
 
-        msg = stop_task(task_id)
+        msg = stop_task(task_id, index_name=data.get("index_name"))
         return jsonify({"message": msg}), 200
+    except LookupError:
+        return jsonify({"error": "Email task not found for this index"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

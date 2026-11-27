@@ -7546,7 +7546,10 @@ def stop_email_task():
         else:
             ensure_admin_access()
 
-        res = requests.post(f"{MAIL_PROCESSOR_URL}/stop-email-task", json=data)
+        res = requests.post(
+            f"{MAIL_PROCESSOR_URL}/stop-email-task",
+            json={"task_id": data.get("task_id"), "index_name": index_name},
+        )
         return jsonify(res.json()), res.status_code
     except PermissionError as e:
         logger.warning(f"Forbidden stop-email-task request: {e}")
